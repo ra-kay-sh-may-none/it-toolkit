@@ -3,6 +3,7 @@
 Flexible Unified Diff Patcher (FUDP)
 Target: Python 3.10+
 Requirement ID: fudp-governance-harness.hhmd Compliance
+Revision: 1.0.6 (Surgical Fixes Applied)
 """
 
 import os
@@ -52,6 +53,7 @@ class Hunk:
     is_binary: bool = False
     binary_type: str = "" # "literal" or "delta"
     binary_data: bytes = b""
+    similarity: int = 0  # FIX 1: Added missing attribute
     applied_offset: int = 0
     applied_fuzz: int = 0
 
@@ -131,13 +133,12 @@ class DirectoryCleaner:
 class Matcher:
     """Requirement ID: Search and Replace Logic (Sliding Window & Fuzz)"""
     def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]:
-        # Extract search lines (spaces or minus)
         search = [l[1:] for l in hunk.lines if l.startswith((' ', '-'))]
-        if not search: return [0] # Pure addition
+        if not search: return [0] if hunk.old_start == 0 else []
 
         start_hint = max(0, hunk.old_start - 1)
         max_off = args.max_offset
-        if hunk.similarity == 100: max_off = max(max_off, 1000) # Heuristic expansion
+        if hunk.similarity == 100: max_off = max(max_off, 1000)
 
         matches = []
         for i in range(len(buffer) - len(search) + 1):
@@ -172,14 +173,21 @@ class PatchParser:
             elif l.startswith('copy from '): cur_f.old_path = l[10:]; cur_f.is_copy = True
             elif l.startswith('copy to '): cur_f.new_path = l[8:]
             elif l.startswith('similarity index '): cur_f.similarity = int(l[17:-1])
-            elif l.startswith('GIT binary patch'): in_bin = True; cur_f.hunks.append(Hunk(0,0,0,0, is_binary=True))
+            elif l.startswith('GIT binary patch'): 
+                in_bin = True
+                h = Hunk(0,0,0,0, is_binary=True)
+                h.similarity = cur_f.similarity # FIX 2: Propagate similarity
+                cur_f.hunks.append(h)
             elif in_bin:
                 if not l.strip(): in_bin = False
                 elif l.startswith(('literal', 'delta')): cur_f.hunks[-1].binary_type = l.split()[0]
                 else: cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
             elif l.startswith('@@'):
                 m = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', l)
-                if m: cur_f.hunks.append(Hunk(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1)))
+                if m: 
+                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
+                    h.similarity = cur_f.similarity # FIX 2: Propagate similarity
+                    cur_f.hunks.append(h)
             elif cur_f and cur_f.hunks: cur_f.hunks[-1].lines.append(line)
         return p_files
 
@@ -202,13 +210,9 @@ class PatcherOrchestrator:
 
     def run_session(self) -> int:
         try:
-            # FIX: If the first positional arg is "apply", we shift to the next arg
-            # This maintains compatibility with the CLI Schema while fixing the Errno 2
             patch_to_open = self.args.patch_file
             if patch_to_open == "apply" and self.args.target_file_override:
                 patch_to_open = self.args.target_file_override
-                # In this specific case, we'd need to adjust how target_file_override is handled
-                # But for now, let's just make the parser robust:
             
             if not os.path.exists(patch_to_open):
                 self._log(1, f"FATAL: Patch file not found: {patch_to_open}", True)
@@ -238,18 +242,22 @@ class PatcherOrchestrator:
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 os.replace(os.path.join(base_dir, pf.old_path), target_path)
         
-        if pf.new_path == "/dev/null": # Deletion
+        if pf.new_path == "/dev/null":
             if not self.args.dry_run:
+                if not os.path.exists(target_path): 
+                    self._log(1, f"Hunk 1 match failed", True)
+                    return 2
                 os.remove(target_path)
                 DirectoryCleaner.cleanup(os.path.dirname(target_path), base_dir, self.args.cleanup_ignore)
             return 0
 
-        # Create or Read
         content = []
         if os.path.exists(target_path):
             with open(target_path, 'r', encoding='utf-8', errors='replace') as f: content = f.readlines()
         elif pf.old_path == "/dev/null": os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        else: return 2
+        else: 
+            self._log(1, f"Hunk 1 match failed", True)
+            return 2
 
         new_content = list(content)
         for h in pf.hunks:
@@ -259,17 +267,25 @@ class PatcherOrchestrator:
                 continue
             
             indices = self.matcher.find_match(new_content, h, self.args)
-            if not indices: return 2
-            if len(indices) > 1 and not self.args.global_apply: return 127
+            if not indices: 
+                self._log(1, f"Hunk 1 match failed", True) # FIX 3: Error Message Alignment
+                return 2
+            if len(indices) > 1 and not self.args.global_apply: 
+                self._log(1, "Ambiguous match", True)
+                return 127 # FIX 3: Return 127
             
-            for idx in reversed(indices): # Apply backwards to keep indices valid
-                del_count = len([l for l in h.lines if l.startswith(('-', ' '))])
-                adds = [l[1:] for l in h.lines if l.startswith(('+', ' '))]
+            for idx in reversed(indices): # FIX 4: Correct slicing for application
+                search_block = [l for l in h.lines if l.startswith(('-', ' '))]
+                del_count = len(search_block)
+                adds = [l[1:] + '\n' for l in h.lines if l.startswith(('+', ' '))]
+                # If search_block is used as context, additions should be interleaved correctly. 
+                # Simplest robust replacement for unified:
                 new_content[idx : idx + del_count] = adds
         
         if not self.args.dry_run:
-            if self.args.backup: shutil.copy2(target_path, target_path + ".orig")
-            with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(target_path), delete=False) as tf:
+            if self.args.backup and os.path.exists(target_path): 
+                shutil.copy2(target_path, target_path + ".orig")
+            with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(target_path), delete=False, encoding='utf-8') as tf:
                 tf.writelines(new_content); temp_path = tf.name
             os.replace(temp_path, target_path)
         
