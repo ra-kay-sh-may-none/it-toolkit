@@ -1016,6 +1016,142 @@ Feature: Feature 4 - Recursive Directory Cleanup and File Deletion
       """
       """
 
+Feature: Feature 4 - Recursive Directory Cleanup and File Deletion
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+  # Based on Specification Revision: 1.0.3
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # POSITIVE SCENARIO 34: Strict Emptiness (Option A - Default)
+  # Verifies that a directory is deleted only when 100% empty.
+  Scenario: Recursive Removal of Truly Empty Parent Directory
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Sole file
+      """
+    And a patch file "/home/user/patches/strict_del.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# Sole file
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strict_del.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should not exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Removed empty directory: dir1
+      """
+    And STDERR should exactly match:
+      """
+      """
+
+  # NEGATIVE SCENARIO 34: Strict Emptiness with Untracked File (Option A - Default)
+  # Verifies that the directory is NOT deleted if an un-ignored hidden file exists.
+  Scenario: Skip Directory Removal when Untracked Hidden File Exists
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py"
+    And the directory "/mnt/data/sources/dir1/" also contains a hidden file ".DS_Store"
+    And a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Sole file
+      """
+    And a patch file "/home/user/patches/strict_skip.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# Sole file
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strict_skip.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should still exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Skipped directory removal: dir1 is not empty.
+      """
+    And STDERR should exactly match:
+      """
+      """
+
+  # POSITIVE SCENARIO 35: Cleanup with Ignore List (Option C)
+  # Verifies that the directory is deleted if it only contains files matching the ignore pattern.
+  Scenario: Forced Directory Removal ignoring Specific Hidden Files
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py"
+    And the directory "/mnt/data/sources/dir1/" also contains a hidden file ".DS_Store"
+    And a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Sole file
+      """
+    And a patch file "/home/user/patches/ignore_del.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# Sole file
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ignore_del.patch --directory=/mnt/data/sources --cleanup-ignore=".DS_Store"
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should not exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Removed empty directory: dir1 (ignoring .DS_Store)
+      """
+    And STDERR should exactly match:
+      """
+      """
+
+  # NEGATIVE SCENARIO 35: Ignore List with Mismatched Untracked File
+  # Verifies that the directory is NOT deleted if an untracked file does NOT match the ignore pattern.
+  Scenario: Skip Directory Removal when an Un-ignored Untracked File Exists
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py"
+    And the directory "/mnt/data/sources/dir1/" also contains a file "readme.txt"
+    And a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Sole file
+      """
+    And a patch file "/home/user/patches/ignore_fail.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# Sole file
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ignore_fail.patch --directory=/mnt/data/sources --cleanup-ignore=".DS_Store"
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should still exist because "readme.txt" was not ignored
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Skipped directory removal: dir1 is not empty.
+      """
+    And STDERR should exactly match:
+      """
+      """
+
 Feature: Feature 5 - Binary Data and Base85 Decoding
   # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
 
