@@ -1,0 +1,48 @@
+#. REVISION CONTROL BLOCK:
+	##. Document Title: Grounding Rules with Universal Fencing and Directory Structure.
+	##. Revision Number: 1.3.0.
+	##. Status: Active / Instructional.
+	##. Format: HHMD (Hash Hierarchical Markdown).
+
+#. Core Grounding Rules for Test Case Generation.
+	##. Environmental Isolation Rule:
+		###. Every test scenario must explicitly define four distinct paths to verify resolution logic:
+			####. The absolute path of the patcher executable (e.g., /opt/bin/patcher).
+			####. The Current Working Directory (CWD) from which the command is issued (e.g., /home/user/workspace).
+			####. The Source Directory containing the target files to be patched (e.g., /mnt/data/sources).
+			####. The Patch Directory containing the .patch or .diff files (e.g., /home/user/patches).
+	##. Standardized Directory Structure Rule:
+		###. All scenarios must assume the following base file tree exists in the Source Directory:
+			####. dir1/file1.py
+			####. dir2/file21.py
+			####. dir2/file22.json
+			####. dir3/file31.json
+			####. dir3/file31.py
+			####. dir3/file32.json
+			####. dir3/file32.py
+			####. dir4/file41.bin
+		###. Individual scenarios may target a subset of these files as required by the specific feature being tested.
+	##. Universal Fencing Rule:
+		###. EVERYTHING technical and character-exact must be enclosed in fenced code blocks.
+		###. This includes: Main file content, Patch file content, CLI commands, STDOUT, and STDERR.
+		###. This rule applies even if the content is only one line or is entirely empty.
+		###. Empty states (like an empty STDERR) must be represented as an empty fenced block.
+	##. Exact Content Rule:
+		###. All file inputs and expected outputs MUST be character-exact.
+		###. Main file "Givens" must reflect the state before the patch.
+		###. Patch file content must include full headers, hunk markers, and prefixes ( , -, +).
+	##. Explicit CLI Invocation Rule:
+		###. The "When" step must show the literal command-line string inside a fenced block.
+		###. It must include the absolute path to the patcher and all relevant flags (--directory, --strip, etc.).
+	##. Logging and Exit Code Rule:
+		###. Every scenario must verify the specific exit code (0, 1, 2, or 127) defined in the specification.
+		###. Expected log messages must be identified by their destination (STDOUT or STDERR) and fenced.
+	##. Filesystem Integrity Rule:
+		###. Tests must explicitly verify the existence or non-existence of files after operations.
+		###. Scenarios for deletions must verify the recursive removal of empty parent directories.
+	##. Permutation Rule:
+		###. Test suites must cover 100% of the combinations in the Golden Source specification:
+			####. Stop (Default) vs. Continue execution strategies.
+			####. Strict (Default) vs. Flexible (Fuzz/Offset) matching.
+			####. Identity shifts (Rename/Copy) and complex data (Binary Base85).
+			####. Environmental factors (Symlinks/Encoding/Line Endings).
