@@ -1,0 +1,1447 @@
+Feature: Feature 1 - Detailed Positional and Search Logic
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 1: STRICT POSITIONAL (LINE NUMBER HINTS) ---
+
+  Scenario: [POSITIVE] Strict Positional Match - Success at Exact Line
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      Line 1
+      Line 2
+      Line 3
+      """
+    And a patch file "/home/user/patches/strict_hit.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      @@ -2,1 +2,1 @@
+      -Line 2
+      +Line 2 mod
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strict_hit.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should exactly match:
+      """
+      Line 1
+      Line 2 mod
+      Line 3
+      """
+
+  Scenario: [NEGATIVE] Strict Positional Match - Failure on Hint Mismatch
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      Line 1
+      Line 2
+      """
+    And a patch file "/home/user/patches/strict_miss.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      @@ -10,1 +10,1 @@
+      -Line 2
+      +Line 2 mod
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strict_miss.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 match failed for dir1/file1.py: Expected line 10, found mismatch (Strict Mode).
+      """
+
+  # --- PAIR 2: SEARCH AND REPLACE (MISSING @@) ---
+
+  Scenario: [POSITIVE] Search and Replace - Unique Match
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      def start():
+          process()
+      """
+    And a patch file "/home/user/patches/search_hit.patch" with content:
+      """
+      --- dir2/file21.py
+      +++ dir2/file21.py
+       def start():
+      -    process()
+      +    execute()
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/search_hit.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21.py" should contain "execute()"
+
+  Scenario: [NEGATIVE] Search and Replace - Context Not Found
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      def stop():
+          pass
+      """
+    And a patch file "/home/user/patches/search_miss.patch" with content:
+      """
+      --- dir2/file21.py
+      +++ dir2/file21.py
+      -def start():
+      +def init():
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/search_miss.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 failed for dir2/file21.py: Literal context not found in file.
+      """
+
+  # --- PAIR 3: AMBIGUITY HANDLING ---
+
+  Scenario: [NEGATIVE] Ambiguity Check - Multiple Hits in Strict Mode
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      duplicated_line
+      duplicated_line
+      """
+    And a patch file "/home/user/patches/ambig.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      -duplicated_line
+      +unique_line
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ambig.patch --directory=/mnt/data/sources --strict
+      """
+    Then the exit code should be 127
+    And STDERR should exactly match:
+      """
+      Ambiguous match: 2 occurrences found for the provided context block.
+      """
+
+  Scenario: [POSITIVE] Ambiguity Override - Global Application
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      duplicated_line
+      duplicated_line
+      """
+    And a patch file "/home/user/patches/global.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      -duplicated_line
+      +unique_line
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/global.patch --directory=/mnt/data/sources --global
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file32.py" should exactly match:
+      """
+      unique_line
+      unique_line
+      """
+
+  # --- PAIR 4: FUZZ FACTOR TOLERANCE ---
+
+  Scenario: [POSITIVE] Fuzz Factor - Context Drift Tolerance
+    Given a file "/mnt/data/sources/dir3/file31.json" with content:
+      """
+      {"version": "1.2", "active": true}
+      """
+    And a patch file "/home/user/patches/fuzz.patch" with content:
+      """
+      --- dir3/file31.json
+      +++ dir3/file31.json
+      -{"version": "1.0", "active": true}
+      +{"version": "1.0", "active": false}
+      """
+    # Note: version "1.2" on disk vs "1.0" in patch.
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/fuzz.patch --directory=/mnt/data/sources --fuzz=1
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file31.json" should contain '"active": false'
+
+  Scenario: [NEGATIVE] Fuzz Factor - Insufficient Tolerance
+    Given a file "/mnt/data/sources/dir3/file31.json" with content:
+      """
+      {"version": "2.0", "active": true}
+      """
+    And a patch file "/home/user/patches/fuzz_fail.patch" with content:
+      """
+      --- dir3/file31.json
+      +++ dir3/file31.json
+      -{"version": "1.0", "active": true}
+      +{"version": "1.0", "active": false}
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/fuzz_fail.patch --directory=/mnt/data/sources --fuzz=0
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 failed for dir3/file31.json: Context mismatch (Fuzz factor 0).
+      """
+
+Feature: Feature 2 - Input Scope and Target Resolution
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 5: EXPLICIT TARGET OVERRIDE ---
+
+  Scenario: [POSITIVE] Explicit Target File Override via CLI
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Old Header
+      """
+    And a patch file "/home/user/patches/generic.patch" with content:
+      """
+      --- irrelevant/path.py
+      +++ irrelevant/path.py
+      @@ -1,1 +1,1 @@
+      -# Old Header
+      +# New Header
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/generic.patch /mnt/data/sources/dir1/file1.py
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should contain "# New Header"
+
+  Scenario: [NEGATIVE] Explicit Target Override - File Not Found
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/generic.patch /mnt/data/sources/nonexistent.py
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Explicit target file not found: /mnt/data/sources/nonexistent.py
+      """
+
+  # --- PAIR 6: PATH STRIPPING (-p) ---
+
+  Scenario: [POSITIVE] Path Stripping Success
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      x = 0
+      """
+    And a patch file "/home/user/patches/strip_hit.patch" with content:
+      """
+      --- a/dir2/file21.py
+      +++ b/dir2/file21.py
+      @@ -1,1 +1,1 @@
+      -x = 0
+      +x = 1
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strip_hit.patch --directory=/mnt/data/sources --strip=1
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21.py" should contain "x = 1"
+
+  Scenario: [NEGATIVE] Path Stripping Failure - Incorrect Level
+    And a patch file "/home/user/patches/strip_fail.patch" with content:
+      """
+      --- a/b/dir2/file21.py
+      +++ a/b/dir2/file21.py
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strip_fail.patch --directory=/mnt/data/sources --strip=1
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Target file not found: /mnt/data/sources/b/dir2/file21.py
+      """
+
+Feature: Feature 3 - Session Path Mapping and Rename/Copy Logic
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 7: ATOMIC FILE RENAME ---
+
+  Scenario: [POSITIVE] Successful File Rename and Identity Shift
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      print("A")
+      """
+    And a patch file "/home/user/patches/rename.patch" with content:
+      """
+      --- rename from dir1/file1.py
+      +++ rename to dir1/renamed.py
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/rename.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the file "/mnt/data/sources/dir1/renamed.py" should exist
+
+  Scenario: [NEGATIVE] Rename Destination Blocked by Existing File
+    Given a file "/mnt/data/sources/dir1/file1.py"
+    And a file "/mnt/data/sources/dir1/existing.py"
+    And a patch file "/home/user/patches/rename_blocked.patch" with content:
+      """
+      --- rename from dir1/file1.py
+      +++ rename to dir1/existing.py
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/rename_blocked.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Cannot rename to dir1/existing.py: Destination already exists.
+      """
+
+  # --- PAIR 8: DIRECTORY RENAME PREFIX MAPPING ---
+
+  Scenario: [POSITIVE] Directory Rename Virtual Routing
+    Given a directory "/mnt/data/sources/dir2/" containing "file21.py"
+    And a patch file "/home/user/patches/dir_rename.patch" with content:
+      """
+      --- rename from dir2/
+      +++ rename to modern_dir2/
+      --- dir2/file21.py
+      +++ modern_dir2/file21.py
+      @@ -1,1 +1,1 @@
+      -old
+      +new
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/dir_rename.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/modern_dir2/file21.py" should contain "new"
+
+  Scenario: [NEGATIVE] Path Identity Conflict within Session
+    Given a file "/mnt/data/sources/dir3/file31.py"
+    And a patch file "/home/user/patches/path_conflict.patch" with content:
+      """
+      --- rename from dir3/file31.py
+      +++ rename to dir3/new_31.py
+      --- dir3/file31.py
+      +++ dir3/file31.py
+      @@ -1,1 +1,1 @@
+      -old
+      +new
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/path_conflict.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Path Identity Conflict - dir3/file31.py was already renamed to dir3/new_31.py
+      """
+
+  # --- PAIR 9: FILE COPY TRACKING ---
+
+  Scenario: [POSITIVE] File Copy and Secondary Edit
+    Given a file "/mnt/data/sources/dir2/file22.json" with content:
+      """
+      {"id": 1}
+      """
+    And a patch file "/home/user/patches/copy_edit.patch" with content:
+      """
+      copy from dir2/file22.json
+      copy to dir2/copy.json
+      --- dir2/copy.json
+      +++ dir2/copy.json
+      @@ -1,1 +1,1 @@
+      -{"id": 1}
+      +{"id": 2}
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/copy_edit.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And "/mnt/data/sources/dir2/file22.json" should contain '"id": 1'
+    And "/mnt/data/sources/dir2/copy.json" should contain '"id": 2'
+
+  Scenario: [NEGATIVE] Copy Source Missing
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/bad_copy.patch --directory=/mnt/data/sources
+      """
+    # Assuming patch contains: copy from missing.py copy to found.py
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Copy source not found: dir2/missing.py
+      """
+
+Feature: Feature 4 - File Deletion and Recursive Directory Cleanup
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 10: RECURSIVE DIRECTORY CLEANUP ---
+
+  Scenario: [POSITIVE] Recursive Removal of Truly Empty Parent Directories
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Sole file
+      """
+    And a patch file "/home/user/patches/delete_and_clean.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# Sole file
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/delete_and_clean.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should not exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Removed empty directory: dir1
+      """
+
+  Scenario: [NEGATIVE] Strict Emptiness Check (Option A) Failure
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py"
+    And the directory "/mnt/data/sources/dir1/" also contains an untracked file "manual.txt"
+    And a patch file "/home/user/patches/strict_delete.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/strict_delete.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should not exist
+    And the directory "/mnt/data/sources/dir1" should still exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Skipped directory removal: dir1 is not empty.
+      """
+
+  # --- PAIR 11: CLEANUP IGNORE LOGIC (OPTION C) ---
+
+  Scenario: [POSITIVE] Directory Removal Ignoring Specific Files
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py" and ".DS_Store"
+    And a patch file "/home/user/patches/ignore_delete.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ignore_delete.patch --directory=/mnt/data/sources --cleanup-ignore=".DS_Store"
+      """
+    Then the exit code should be 0
+    And the directory "/mnt/data/sources/dir1" should not exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Removed empty directory: dir1 (ignoring .DS_Store)
+      """
+
+  Scenario: [NEGATIVE] Ignore List Failure with Mismatched Untracked File
+    Given a directory "/mnt/data/sources/dir1/" containing "file1.py" and "readme.txt"
+    And a patch file "/home/user/patches/ignore_mismatch.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ /dev/null
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ignore_mismatch.patch --directory=/mnt/data/sources --cleanup-ignore=".DS_Store"
+      """
+    Then the exit code should be 0
+    And the directory "/mnt/data/sources/dir1" should still exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir1/file1.py
+      Skipped directory removal: dir1 is not empty.
+      """
+
+Feature: Feature 5 - Sequential Patch Conflict Handling
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 12: SEQUENTIAL STATE VERIFICATION ---
+
+  Scenario: [POSITIVE] Successful Sequential Application of Dependent Patches
+    Given a file "/mnt/data/sources/dir2/file21.py" with content "v1"
+    And a patch "patch1.patch" that renames "dir2/file21.py" to "dir2/file21_new.py"
+    And a patch "patch2.patch" that targets "dir2/file21_new.py" and changes "v1" to "v2"
+    When I run the following command sequence:
+      """
+      /opt/bin/patcher apply /home/user/patches/patch1.patch --directory=/mnt/data/sources
+      /opt/bin/patcher apply /home/user/patches/patch2.patch --directory=/mnt/data/sources
+      """
+    Then the final exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21_new.py" should contain "v2"
+
+  Scenario: [NEGATIVE] Sequential Application Path Identity Conflict
+    Given a file "/mnt/data/sources/dir2/file21.py" with content "v1"
+    And a patch "patch1.patch" that renames "dir2/file21.py" to "dir2/file21_new.py"
+    And a patch "patch2_invalid.patch" that still targets "dir2/file21.py" (unaware of rename)
+    When I run the following command sequence:
+      """
+      /opt/bin/patcher apply /home/user/patches/patch1.patch --directory=/mnt/data/sources
+      /opt/bin/patcher apply /home/user/patches/patch2_invalid.patch --directory=/mnt/data/sources
+      """
+    Then the first exit code should be 0
+    And the second exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Path Identity Conflict - Target file dir2/file21.py was previously moved to dir2/file21_new.py.
+      """
+
+Feature: Feature 6 - Execution Strategy and Order of Operations
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 13: STOP MODE ATOMICITY (DEFAULT) ---
+
+  Scenario: [POSITIVE] Successful Atomic Multi-File Patch
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # File A
+      """
+    And a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      # File B
+      """
+    And a patch file "/home/user/patches/multi_success.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      -# File A
+      +# File A Mod
+      --- dir2/file21.py
+      +++ dir2/file21.py
+      -# File B
+      +# File B Mod
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/multi_success.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should contain "# File A Mod"
+    And the file "/mnt/data/sources/dir2/file21.py" should contain "# File B Mod"
+
+  Scenario: [NEGATIVE] Session Rollback on Single Hunk Failure (Default Stop Mode)
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Valid
+      """
+    And a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      # Valid
+      """
+    And a patch file "/home/user/patches/multi_fail.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      -# Valid
+      +# Modified
+      --- dir2/file21.py
+      +++ dir2/file21.py
+      -# WRONG_CONTEXT
+      +# Modified
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/multi_fail.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And the file "/mnt/data/sources/dir1/file1.py" should exactly match:
+      """
+      # Valid
+      """
+    And the file "/mnt/data/sources/dir2/file21.py" should exactly match:
+      """
+      # Valid
+      """
+    And STDERR should contain "FATAL: Session aborted. Hunk 2 for dir2/file21.py failed. Zero files modified."
+
+  # --- PAIR 14: CONTINUE MODE (BEST EFFORT) ---
+
+  Scenario: [POSITIVE] Best Effort Success with Partial Application
+    Given a file "/mnt/data/sources/dir3/file31.py" with content:
+      """
+      # Valid
+      """
+    And a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      # Valid
+      """
+    And a patch file "/home/user/patches/continue.patch" with content:
+      """
+      --- dir3/file31.py
+      +++ dir3/file31.py
+      -# Valid
+      +# Applied
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      -# WRONG_CONTEXT
+      +# Skipped
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/continue.patch --directory=/mnt/data/sources --continue
+      """
+    Then the exit code should be 1
+    And the file "/mnt/data/sources/dir3/file31.py" should contain "# Applied"
+    And the file "/mnt/data/sources/dir3/file32.py" should still contain "# Valid"
+    And STDOUT should contain "Applied: 1 hunk to dir3/file31.py"
+    And STDERR should contain "Hunk 1 failed for dir3/file32.py (Skipped due to --continue)"
+
+Feature: Feature 7 - Partial Flags (--no-add/--no-delete)
+  # Grounding: Same environment as above
+
+  # --- PAIR 15: NO-ADD RESTRICTION ---
+
+  Scenario: [POSITIVE] Applying Only Deletions using --no-add
+    Given a file "/mnt/data/sources/dir2/file22.json" with content:
+      """
+      {
+        "old": 1,
+        "keep": 2
+      }
+      """
+    And a patch file "/home/user/patches/mix.patch" with content:
+      """
+      --- dir2/file22.json
+      +++ dir2/file22.json
+      @@ -1,4 +1,3 @@
+       {
+      -  "old": 1,
+      +  "new": 1,
+         "keep": 2
+       }
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/mix.patch --directory=/mnt/data/sources --no-add
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file22.json" should exactly match:
+      """
+      {
+        "keep": 2
+      }
+      """
+
+  Scenario: [NEGATIVE] Skip Entirely-Additive Hunk via --no-add
+    Given a file "/mnt/data/sources/dir3/file31.py" with content:
+      """
+      # Start
+      """
+    And a patch file "/home/user/patches/pure_add.patch" with content:
+      """
+      --- dir3/file31.py
+      +++ dir3/file31.py
+      @@ -1,1 +1,2 @@
+       # Start
+      +# Added Line
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/pure_add.patch --directory=/mnt/data/sources --no-add
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file31.py" should remain exactly:
+      """
+      # Start
+      """
+    And STDOUT should contain "Hunk skipped: contains additions and --no-add is enabled."
+
+  # --- PAIR 16: NO-DELETE RESTRICTION ---
+
+  Scenario: [POSITIVE] Applying Only Additions using --no-delete
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      # Base
+      """
+    And a patch file "/home/user/patches/modify.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      -# Base
+      +# New
+      + # Added
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/modify.patch --directory=/mnt/data/sources --no-delete
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file32.py" should exactly match:
+      """
+      # Base
+       # Added
+      """
+
+Feature: Feature 8 - Hunk Structure and Strict Matching Logic
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 17: STRICT POSITIONAL INTEGRITY ---
+
+  Scenario: [POSITIVE] Strict Positional Match - Absolute Success
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Line 1
+      # Line 2
+      # Line 3
+      """
+    And a patch file "/home/user/patches/positional_hit.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      @@ -2,1 +2,1 @@
+      -# Line 2
+      +# Line 2 Modified
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/positional_hit.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/file1.py" should exactly match:
+      """
+      # Line 1
+      # Line 2 Modified
+      # Line 3
+      """
+
+  Scenario: [NEGATIVE] Strict Positional Match - Immediate Failure on Shift
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Noise
+      # Line 1
+      # Line 2
+      """
+    And a patch file "/home/user/patches/positional_miss.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      @@ -1,1 +1,1 @@
+      -# Line 1
+      +# Line 1 Modified
+      """
+    # Note: # Line 1 is actually at line 2.
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/positional_miss.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And the file "/mnt/data/sources/dir1/file1.py" should exactly match:
+      """
+      # Noise
+      # Line 1
+      # Line 2
+      """
+    And STDERR should exactly match:
+      """
+      Hunk 1 match failed for dir1/file1.py: Expected line 1, found "# Noise" (Strict Mode).
+      """
+
+  # --- PAIR 18: FULL-FILE LITERAL SCANNING (OMITTED @@) ---
+
+  Scenario: [POSITIVE] Literal Search for Unique Context Block
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      import math
+      
+      def calc():
+          return 42
+      """
+    And a patch file "/home/user/patches/literal_search.patch" with content:
+      """
+      --- dir2/file21.py
+      +++ dir2/file21.py
+       def calc():
+      -    return 42
+      +    return 100
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/literal_search.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21.py" should contain "return 100"
+    And STDOUT should exactly match:
+      """
+      Applied via full-file literal search: dir2/file21.py
+      """
+
+  Scenario: [NEGATIVE] Literal Search Failure - Non-Existent Context
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      # Empty
+      """
+    And a patch file "/home/user/patches/literal_fail.patch" with content:
+      """
+      --- dir2/file21.py
+      +++ dir2/file21.py
+      -def missing():
+      +def found():
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/literal_fail.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 failed for dir2/file21.py: Literal context not found in file.
+      """
+
+Feature: Feature 9 - Binary Data and Base85 Decoding
+  # Grounding: Same environment as above
+
+  # --- PAIR 19: GIT-STYLE BINARY DELTA ---
+
+  Scenario: [POSITIVE] Successful Base85 Binary Delta Application
+    Given a file "/mnt/data/sources/dir4/file41.bin" with raw binary data
+    And a patch file "/home/user/patches/binary_delta.patch" with content:
+      """
+      --- dir4/file41.bin
+      +++ dir4/file41.bin
+      GIT binary patch
+      delta 12
+      zcmZ>V&OEplzm`W_@9(0;A#)h!A#)h!A#)h!
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/binary_delta.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And STDOUT should exactly match:
+      """
+      Applied binary delta to dir4/file41.bin
+      """
+    And the file "/mnt/data/sources/dir4/file41.bin" should pass internal hash verification
+
+  Scenario: [NEGATIVE] Binary Delta Hash Failure
+    Given a file "/mnt/data/sources/dir4/file41.bin" with corrupted raw bytes
+    And a patch file "/home/user/patches/binary_hash_fail.patch" with content:
+      """
+      --- dir4/file41.bin
+      +++ dir4/file41.bin
+      GIT binary patch
+      delta 10
+      zcmZ>V&OEplzm`W_@9(0;A#)h!
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/binary_hash_fail.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Binary hash verification failed for dir4/file41.bin. Delta application aborted.
+      """
+
+  # --- PAIR 20: BASE85 LITERAL REPLACEMENT ---
+
+  Scenario: [POSITIVE] Base85 Literal Binary Replacement
+    Given the directory "/mnt/data/sources/dir4/" exists
+    And a patch file "/home/user/patches/binary_literal.patch" with content:
+      """
+      --- /dev/null
+      +++ dir4/new_icon.bin
+      GIT binary patch
+      literal 5
+      zcmZ>V&OEpl
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/binary_literal.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir4/new_icon.bin" should exist
+    And STDOUT should exactly match:
+      """
+      Created binary file: dir4/new_icon.bin (5 bytes)
+      """
+
+  Scenario: [NEGATIVE] Binary Literal Corruption (Invalid Base85 Character)
+    Given a patch file "/home/user/patches/binary_corrupt.patch" with content:
+      """
+      --- /dev/null
+      +++ dir4/corrupt.bin
+      GIT binary patch
+      literal 5
+      zcmZ_INVALID_CHAR_!!!
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/binary_corrupt.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Invalid Base85 character encountered in binary hunk.
+      """
+
+Feature: Feature 10 - File Creation, Deletion, and Directory Cleanup
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 21: FILE CREATION AND PARENT DIRECTORY AUTO-MKDIR ---
+
+  Scenario: [POSITIVE] Create New File and Auto-Generate Parent Directories
+    Given the directory "/mnt/data/sources/dir1/" exists but contains no subdirectories
+    And a patch file "/home/user/patches/create.patch" with content:
+      """
+      --- /dev/null
+      +++ dir1/new/path/feature.py
+      @@ -0,0 +1,1 @@
+      +print("New File")
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/create.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir1/new/path/feature.py" should exist
+    And the file "/mnt/data/sources/dir1/new/path/feature.py" should exactly match:
+      """
+      print("New File")
+      """
+    And STDOUT should exactly match:
+      """
+      Created directory: dir1/new/path
+      Created file: dir1/new/path/feature.py
+      """
+
+  Scenario: [NEGATIVE] Creation Failure due to Path Conflict (File as Directory)
+    Given a file "/mnt/data/sources/dir1/conflict" exists with content "I am a file"
+    And a patch file "/home/user/patches/mkdir_fail.patch" with content:
+      """
+      --- /dev/null
+      +++ dir1/conflict/blocked.py
+      @@ -0,0 +1,1 @@
+      +content
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/mkdir_fail.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Cannot create directory dir1/conflict: A file already exists at this path.
+      """
+
+  # --- PAIR 22: RECURSIVE DIRECTORY CLEANUP ---
+
+  Scenario: [POSITIVE] Recursive Deletion of Empty Parent Chain
+    Given a file "/mnt/data/sources/dir3/file31.py" with content:
+      """
+      # delete me
+      """
+    And the directory "/mnt/data/sources/dir3/" contains no other files
+    And a patch file "/home/user/patches/recursive_del.patch" with content:
+      """
+      --- dir3/file31.py
+      +++ /dev/null
+      @@ -1,1 +0,0 @@
+      -# delete me
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/recursive_del.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the directory "/mnt/data/sources/dir3" should not exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir3/file31.py
+      Removed empty directory: dir3
+      """
+
+  Scenario: [NEGATIVE] Skip Cleanup for Partially Full Directory
+    Given a directory "/mnt/data/sources/dir3/" containing "file31.py" and "file31.json"
+    And a patch file "/home/user/patches/partial_del.patch" with content:
+      """
+      --- dir3/file31.py
+      +++ /dev/null
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/partial_del.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file31.py" should not exist
+    And the directory "/mnt/data/sources/dir3" should still exist
+    And STDOUT should exactly match:
+      """
+      Deleted file: dir3/file31.py
+      Skipped directory removal: dir3 is not empty.
+      """
+
+Feature: Feature 11 - Symbolic Link Handling
+  # Grounding: Same environment as above
+
+  # --- PAIR 23: TRANSPARENT SYMLINK RESOLUTION ---
+
+  Scenario: [POSITIVE] Patching Target File via Symbolic Link Name
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      x = 1
+      """
+    And a symbolic link "/mnt/data/sources/dir2/alias.py" pointing to "file21.py"
+    And a patch file "/home/user/patches/sym_follow.patch" with content:
+      """
+      --- dir2/alias.py
+      +++ dir2/alias.py
+      @@ -1,1 +1,1 @@
+      -x = 1
+      +x = 2
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/sym_follow.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21.py" should exactly match:
+      """
+      x = 2
+      """
+    And the path "/mnt/data/sources/dir2/alias.py" should remain a symbolic link
+    And STDOUT should exactly match:
+      """
+      Resolved symlink: dir2/alias.py -> dir2/file21.py
+      Applied: 1 hunk to dir2/file21.py
+      """
+
+  Scenario: [NEGATIVE] Failure on Dangling Symlink Resolution
+    Given a symbolic link "/mnt/data/sources/dir2/dangling" pointing to "ghost.txt"
+    And a patch file "/home/user/patches/broken.patch" with content:
+      """
+      --- dir2/dangling
+      +++ dir2/dangling
+      -old
+      +new
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/broken.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should 2
+    And STDERR should exactly match:
+      """
+      FATAL: Symlink target not found for dir2/dangling: ghost.txt does not exist.
+      """
+
+Feature: Feature 12 - Search and Replace Logic (Max Offset and Fuzz)
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 24: MAX OFFSET (VERTICAL SEARCH WINDOW) ---
+
+  Scenario: [POSITIVE] Successful Match within Sliding Window Boundary
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      # Line 1
+      # Line 2
+      # Line 3
+      # Line 4
+      target_var = 10
+      """
+    And a patch file "/home/user/patches/offset_hit.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      @@ -1,1 +1,1 @@
+      -target_var = 10
+      +target_var = 20
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/offset_hit.patch --directory=/mnt/data/sources --max-offset=10
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file32.py" should contain "target_var = 20"
+    And STDOUT should exactly match:
+      """
+      Applied hunk 1 to dir3/file32.py at line 5 (offset 4).
+      """
+
+  Scenario: [NEGATIVE] Failure when Match exceeds Sliding Window Boundary
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      [10 lines of noise]
+      target_var = 10
+      """
+    And a patch file "/home/user/patches/offset_miss.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      @@ -1,1 +1,1 @@
+      -target_var = 10
+      +target_var = 20
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/offset_miss.patch --directory=/mnt/data/sources --max-offset=5
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 match failed for dir3/file32.py: Potential match found at offset 10 exceeds --max-offset of 5.
+      """
+
+  # --- PAIR 25: CONTENT TOLERANCE (FUZZ FACTOR) ---
+
+  Scenario: [POSITIVE] Content Tolerance via Fuzz Factor
+    Given a file "/mnt/data/sources/dir3/file31.json" with content:
+      """
+      {
+        "status": "active",
+        "retries": 5
+      }
+      """
+    And a patch file "/home/user/patches/fuzz_hit.patch" with content:
+      """
+      --- dir3/file31.json
+      +++ dir3/file31.json
+        "status": "outdated_status",
+      -  "retries": 5
+      +  "retries": 0
+      """
+    # Note: "outdated_status" does not match "active" on disk.
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/fuzz_hit.patch --directory=/mnt/data/sources --fuzz=1
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file31.json" should contain '"retries": 0'
+    And STDOUT should exactly match:
+      """
+      Applied 1 hunk to dir3/file31.json with fuzz factor 1.
+      """
+
+  Scenario: [NEGATIVE] Failure when Mismatches exceed Fuzz Factor
+    Given a file "/mnt/data/sources/dir3/file31.json" with content:
+      """
+      { "a": 1, "b": 2, "c": 3 }
+      """
+    And a patch file "/home/user/patches/fuzz_miss.patch" with content:
+      """
+      --- dir3/file31.json
+      +++ dir3/file31.json
+      - { "a": 9, "b": 9, "c": 3 }
+      + { "a": 9, "b": 9, "c": 4 }
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/fuzz_miss.patch --directory=/mnt/data/sources --fuzz=1
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      Hunk 1 match failed for dir3/file31.json: 2 mismatches found, which exceeds --fuzz of 1.
+      """
+
+Feature: Feature 13 - Line Endings and Encoding Adaptation
+  # Grounding: Same environment as above
+
+  # --- PAIR 26: LINE ENDING NORMALIZATION ---
+
+  Scenario: [POSITIVE] Auto-normalization of DOS Newlines
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      line1\r\nline2\r\n
+      """
+    And a patch file "/home/user/patches/unix.patch" with LF endings:
+      """
+      --- dir2/file21.py\n+++ dir2/file21.py\n@@ -1,2 +1,2 @@\n-line1\n+line1_mod\n line2\n
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/unix.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir2/file21.py" should exactly match:
+      """
+      line1_mod\r\nline2\r\n
+      """
+
+  Scenario: [NEGATIVE] Rejection of Inconsistent Patch Endings
+    Given a patch file "/home/user/patches/mixed.patch" containing both \n and \r\n
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/mixed.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Invalid patch format - Inconsistent line endings detected in patch file.
+      """
+
+  # --- PAIR 27: CHARACTER ENCODING TRANSCODING ---
+
+  Scenario: [POSITIVE] UTF-8 to UTF-16 Transcoding
+    Given a file "/mnt/data/sources/dir3/file32.py" encoded in UTF-16
+      """
+      # Wide-char content
+      """
+    And a patch file "/home/user/patches/utf8.patch" encoded in UTF-8
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      -# Wide-char content
+      +# Updated Wide-char
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/utf8.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file32.py" should remain encoded in UTF-16
+    And STDOUT should contain "Transcoded patch to match target encoding (UTF-16)."
+
+  Scenario: [NEGATIVE] Failure on Undetectable Character Encoding
+    Given a file "/mnt/data/sources/dir4/file41.bin" containing random high-bit bytes
+    And a patch file "/home/user/patches/text.patch"
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/text.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Could not detect character encoding for dir4/file41.bin.
+      """
+
+Feature: Feature 14 - Edge Cases, Heuristics, and Safety Recovery
+  # Grounding: /opt/bin/patcher (EXE), /home/user/workspace (CWD), /mnt/data/sources (SRC), /home/user/patches (PATCH)
+  # Based on Specification Revision: 1.0.3 (Final Coverage Loop)
+
+  Background:
+    Given the patcher executable is installed at "/opt/bin/patcher"
+    And the current working directory is "/home/user/workspace"
+    And the target source files are located in "/mnt/data/sources"
+    And the patch files are located in "/home/user/patches"
+
+  # --- PAIR 28: SIMILARITY-BASED AUTO-SEARCH (HEURISTICS) ---
+
+  Scenario: [POSITIVE] Similarity Index Enables Implicit Window Expansion
+    Given a file "/mnt/data/sources/dir1/file1.py" with content:
+      """
+      # Static Header
+      # Noise
+      # More Noise
+      target_logic = True
+      """
+    And a patch file "/home/user/patches/similarity_heuristic.patch" with content:
+      """
+      --- dir1/file1.py
+      +++ dir1/file1.py
+      similarity index 100%
+      @@ -1,1 +1,1 @@
+      -target_logic = True
+      +target_logic = False
+      """
+    # Note: No --max-offset is provided, but similarity index is 100%.
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/similarity_heuristic.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 0
+    And STDOUT should contain "Heuristic: Similarity index 100% expanded search window."
+    And the file "/mnt/data/sources/dir1/file1.py" should contain "target_logic = False"
+
+  Scenario: [NEGATIVE] Dissimilarity Safety Abort
+    Given a file "/mnt/data/sources/dir2/file21.py" with content:
+      """
+      # Completely different code block
+      """
+    And a patch file "/home/user/patches/dissim_fail.patch" with content:
+      """
+      --- dir2/file21.py
+      +++ dir2/file21.py
+      dissimilarity index 95%
+      -old_logic
+      +new_logic
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/dissim_fail.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And STDERR should exactly match:
+      """
+      FATAL: Safety Abort - Dissimilarity index (95%) exceeds threshold. Use --fuzz to override.
+      """
+
+  # --- PAIR 29: PARTIAL FLAGS (--no-add / --no-delete) ---
+
+  Scenario: [POSITIVE] Partial Application ignoring Additions
+    Given a file "/mnt/data/sources/dir3/file31.json" with content:
+      """
+      { "key": "old" }
+      """
+    And a patch file "/home/user/patches/partial_flags.patch" with content:
+      """
+      --- dir3/file31.json
+      +++ dir3/file31.json
+      @@ -1,1 +1,2 @@
+      -{ "key": "old" }
+      +{ "key": "new" }
+      + { "added": "field" }
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/partial_flags.patch --directory=/mnt/data/sources --no-add
+      """
+    Then the exit code should be 0
+    And the file "/mnt/data/sources/dir3/file31.json" should exactly match:
+      """
+      { "key": "new" }
+      """
+
+  Scenario: [NEGATIVE] Multi-hunk Stop Mode with --no-delete Violation
+    Given a file "/mnt/data/sources/dir3/file32.py" with content:
+      """
+      print("KEEP")
+      print("REMOVE")
+      """
+    And a patch file "/home/user/patches/delete_violation.patch" with content:
+      """
+      --- dir3/file32.py
+      +++ dir3/file32.py
+      @@ -2,1 +2,0 @@
+      -print("REMOVE")
+      """
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/delete_violation.patch --directory=/mnt/data/sources --no-delete
+      """
+    Then the exit code should be 2
+    And the file "/mnt/data/sources/dir3/file32.py" should remain unchanged
+    And STDERR should exactly match:
+      """
+      FATAL: Session aborted. Hunk contains deletions but --no-delete is enabled.
+      """
+
+  # --- PAIR 30: FILE WRITE SAFETY & RECOVERY ---
+
+  Scenario: [POSITIVE] Atomic Write-Then-Rename Integrity
+    Given a file "/mnt/data/sources/dir1/file1.py"
+    And a patch file "/home/user/patches/atomic_check.patch"
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/atomic_check.patch --directory=/mnt/data/sources --verbose=3
+      """
+    Then a temporary file matching ".patch.file1.py.tmp" should be created in "/mnt/data/sources/dir1/"
+    And the original "file1.py" should only be replaced AFTER the temp file is fully written.
+
+  Scenario: [NEGATIVE] Disk Full Failure Recovery (Write Safety)
+    Given a file "/mnt/data/sources/dir1/file1.py"
+    And the filesystem is forced to return "No space left on device" during the temp write phase
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/atomic_check.patch --directory=/mnt/data/sources
+      """
+    Then the exit code should be 2
+    And the original file "/mnt/data/sources/dir1/file1.py" should remain 100% intact and uncorrupted
+    And STDERR should contain "FATAL: Disk full during atomic write. Original file preserved."
+
+  # --- PAIR 31: AMBIGUITY CODE 127 ---
+
+  Scenario: [NEGATIVE] Ambiguous Match Returns Exit Code 127
+    Given a file "/mnt/data/sources/dir2/file22.json" with three identical lines:
+      """
+      "status": "active",
+      "status": "active",
+      "status": "active"
+      """
+    And a patch file "/home/user/patches/ambig_hit.patch" with content:
+      """
+      --- dir2/file22.json
+      +++ dir2/file22.json
+      -"status": "active"
+      +"status": "inactive"
+      """
+    # Note: --strict is implied in default behavior for ambiguity.
+    When I run the following command:
+      """
+      /opt/bin/patcher apply /home/user/patches/ambig_hit.patch --directory=/mnt/data/sources --strict
+      """
+    Then the exit code should be 127
+    And STDERR should exactly match:
+      """
+      Ambiguous match: 3 occurrences found for the provided context block.
+      """
