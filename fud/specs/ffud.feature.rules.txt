@@ -1,6 +1,6 @@
 #. REVISION CONTROL BLOCK:
-	##. Document Title: Grounding Rules with Universal Fencing and Directory Structure.
-	##. Revision Number: 1.3.0.
+	##. Document Title: Grounding Rules with Universal Fencing and Paired Complexity.
+	##. Revision Number: 1.5.0.
 	##. Status: Active / Instructional.
 	##. Format: HHMD (Hash Hierarchical Markdown).
 
@@ -21,28 +21,22 @@
 			####. dir3/file32.json
 			####. dir3/file32.py
 			####. dir4/file41.bin
-		###. Individual scenarios may target a subset of these files as required by the specific feature being tested.
 	##. Universal Fencing Rule:
 		###. EVERYTHING technical and character-exact must be enclosed in fenced code blocks.
 		###. This includes: Main file content, Patch file content, CLI commands, STDOUT, and STDERR.
-		###. This rule applies even if the content is only one line or is entirely empty.
-		###. Empty states (like an empty STDERR) must be represented as an empty fenced block.
+		###. Empty states must be represented as an empty fenced block.
+	##. Paired Complexity Rule:
+		###. Features must be presented in ascending order of complexity.
+		###. Every scenario within a feature must be presented as a Pair:
+			####. 1. Positive Scenario: Demonstrates successful execution of the specific logic.
+			####. 2. Negative/Edge Scenario: Demonstrates the specific failure mode or boundary constraint.
 	##. Exact Content Rule:
-		###. All file inputs and expected outputs MUST be character-exact.
-		###. Main file "Givens" must reflect the state before the patch.
-		###. Patch file content must include full headers, hunk markers, and prefixes ( , -, +).
+		###. All inputs and outputs must be character-exact, reflecting prefixes and headers.
 	##. Explicit CLI Invocation Rule:
-		###. The "When" step must show the literal command-line string inside a fenced block.
-		###. It must include the absolute path to the patcher and all relevant flags (--directory, --strip, etc.).
+		###. The "When" step must show the literal command string inside a fenced block.
 	##. Logging and Exit Code Rule:
-		###. Every scenario must verify the specific exit code (0, 1, 2, or 127) defined in the specification.
-		###. Expected log messages must be identified by their destination (STDOUT or STDERR) and fenced.
+		###. Verify exit codes (0, 1, 2, or 127) and log destinations (STDOUT/STDERR) in fenced blocks.
 	##. Filesystem Integrity Rule:
-		###. Tests must explicitly verify the existence or non-existence of files after operations.
-		###. Scenarios for deletions must verify the recursive removal of empty parent directories.
+		###. Verify (non)existence of files and recursive removal of empty parent directories.
 	##. Permutation Rule:
-		###. Test suites must cover 100% of the combinations in the Golden Source specification:
-			####. Stop (Default) vs. Continue execution strategies.
-			####. Strict (Default) vs. Flexible (Fuzz/Offset) matching.
-			####. Identity shifts (Rename/Copy) and complex data (Binary Base85).
-			####. Environmental factors (Symlinks/Encoding/Line Endings).
+		###. Test suites must cover 100% of the combinations in the Golden Source specification.
