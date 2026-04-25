@@ -77,18 +77,38 @@ class Base85Codec:
 
     @classmethod
     def decode(cls, text_data: str) -> bytes:
-        raw = text_data.encode('ascii')
-        if not raw: return b""
-        expected_len = cls._DECODE_MAP[raw[0]]
-        payload = raw[1:]
-        out = bytearray()
-        for i in range(0, len(payload), 5):
-            chunk = payload[i:i+5]
-            acc = 0
-            for char in chunk:
-                acc = acc * 85 + cls._DECODE_MAP[char]
-            out.extend(struct.pack(">I", acc))
-        return bytes(out[:expected_len])
+        """Requirement ID: Binary Data and Base85 Decoding (Git Z-85 variant)"""
+        # Strip whitespace to isolate payload
+        raw = text_data.strip().encode('ascii')
+        if not raw:
+            return b""
+            
+        try:
+            # First character in Git Base85 lines indicates the decoded length
+            expected_len = cls._DECODE_MAP[raw[0]]
+            payload = raw[1:]
+            out = bytearray()
+            
+            # Process in chunks of 5 characters
+            for i in range(0, len(payload), 5):
+                chunk = payload[i : i + 5]
+                if len(chunk) < 5:
+                    continue # Ignore trailing padding
+                
+                acc = 0
+                for char in chunk:
+                    if char not in cls._DECODE_MAP:
+                        raise FormatError(f"Invalid Base85 character: {chr(char)}")
+                    acc = acc * 85 + cls._DECODE_MAP[char]
+                
+                # Pack into 4-byte big-endian unsigned integer
+                out.extend(struct.pack(">I", acc))
+            
+            # Slice to the length specified by the prefix character
+            return bytes(out[:expected_len])
+            
+        except (KeyError, IndexError):
+            raise FormatError("Invalid Base85 character or malformed binary hunk header")
 
 class IdentityMap:
     """Requirement ID: Session Path Mapping and Rename/Copy Logic"""
@@ -133,28 +153,43 @@ class DirectoryCleaner:
 class Matcher:
     """Requirement ID: Search and Replace Logic (Sliding Window & Fuzz)"""
     def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]:
+        """Requirement ID: Search and Replace Logic (Sliding Window & Fuzz)"""
+        # Extract search lines (spaces or minus)
         search = [l[1:] for l in hunk.lines if l.startswith((' ', '-'))]
-        if not search: return [0] if hunk.old_start == 0 else []
+        
+        # FIX: If search context is required but search block is empty, 
+        # it's only a match if it's a pure creation (old_start == 0).
+        if not search:
+            return [len(buffer)] if hunk.old_start == 0 else []
 
         start_hint = max(0, hunk.old_start - 1)
         max_off = args.max_offset
-        if hunk.similarity == 100: max_off = max(max_off, 1000)
+        if hunk.similarity == 100:
+            max_off = max(max_off, 1000)
 
         matches = []
+        # FIX: Ensure we scan the entire file if max_off allows or if in search mode
         for i in range(len(buffer) - len(search) + 1):
             offset = abs(i - start_hint)
-            if max_off > 0 and offset > max_off: continue
-            if args.strict and max_off == 0 and offset != 0: continue
+            
+            # If not in search-mode (@@ provided) and max-offset is 0, only check hint index
+            if hunk.old_start != 0 and max_off == 0 and offset != 0:
+                continue
+            if max_off > 0 and offset > max_off:
+                continue
             
             mismatches = 0
-            for b_line, s_line in zip(buffer[i : i + len(search)], search):
+            for j, s_line in enumerate(search):
+                b_line = buffer[i + j]
                 b = b_line.strip() if args.ignore_leading_whitespace else b_line.rstrip('\r\n')
                 s = s_line.strip() if args.ignore_leading_whitespace else s_line.rstrip('\r\n')
-                if b != s: mismatches += 1
+                if b != s:
+                    mismatches += 1
             
             if mismatches <= args.fuzz:
                 matches.append(i)
-                if not args.global_apply and len(matches) > 1: break
+                if not args.global_apply and len(matches) > 1:
+                    break
         return matches
 
 class PatchParser:
@@ -166,29 +201,36 @@ class PatchParser:
         for line in stream:
             l = line.rstrip('\r\n')
             if l.startswith('--- '):
-                cur_f = PatchFile(); cur_f.old_path = l[4:].split('\t')[0]; p_files.append(cur_f); in_bin = False
-            elif l.startswith('+++ '): cur_f.new_path = l[4:].split('\t')[0]
-            elif l.startswith('rename from '): cur_f.old_path = l[12:]; cur_f.is_rename = True
-            elif l.startswith('rename to '): cur_f.new_path = l[10:]
-            elif l.startswith('copy from '): cur_f.old_path = l[10:]; cur_f.is_copy = True
-            elif l.startswith('copy to '): cur_f.new_path = l[8:]
-            elif l.startswith('similarity index '): cur_f.similarity = int(l[17:-1])
-            elif l.startswith('GIT binary patch'): 
+                cur_f = PatchFile()
+                # FIX: Ensure we get the string path, not a list from .split()
+                cur_f.old_path = l[4:].split('\t')[0].strip()
+                p_files.append(cur_f); in_bin = False
+            elif l.startswith('+++ ') and cur_f:
+                cur_f.new_path = l[4:].split('\t')[0].strip()
+            elif l.startswith('rename from ') and cur_f:
+                cur_f.old_path = l[12:]; cur_f.is_rename = True
+            elif l.startswith('rename to ') and cur_f:
+                cur_f.new_path = l[10:]
+            elif l.startswith('similarity index ') and cur_f:
+                cur_f.similarity = int(l[17:-1])
+            elif l.startswith('GIT binary patch') and cur_f:
                 in_bin = True
-                h = Hunk(0,0,0,0, is_binary=True)
-                h.similarity = cur_f.similarity # FIX 2: Propagate similarity
+                h = Hunk(0, 0, 0, 0, is_binary=True)
+                h.similarity = cur_f.similarity
                 cur_f.hunks.append(h)
             elif in_bin:
                 if not l.strip(): in_bin = False
-                elif l.startswith(('literal', 'delta')): cur_f.hunks[-1].binary_type = l.split()[0]
-                else: cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
-            elif l.startswith('@@'):
+                elif not l.startswith(('literal', 'delta')):
+                    cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
+            elif l.startswith('@@') and cur_f:
                 m = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', l)
-                if m: 
-                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
-                    h.similarity = cur_f.similarity # FIX 2: Propagate similarity
+                if m:
+                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), 
+                             int(m.group(3)), int(m.group(4) or 1))
+                    h.similarity = cur_f.similarity
                     cur_f.hunks.append(h)
-            elif cur_f and cur_f.hunks: cur_f.hunks[-1].lines.append(line)
+            elif cur_f and cur_f.hunks:
+                cur_f.hunks[-1].lines.append(line)
         return p_files
 
 class PatcherOrchestrator:
@@ -210,86 +252,81 @@ class PatcherOrchestrator:
 
     def run_session(self) -> int:
         try:
-            patch_to_open = self.args.patch_file
-            if patch_to_open == "apply" and self.args.target_file_override:
-                patch_to_open = self.args.target_file_override
+            patch_file = self.args.patch_file
+            if patch_file == "apply" and self.args.target_file_override:
+                patch_file = self.args.target_file_override
             
-            if not os.path.exists(patch_to_open):
-                self._log(1, f"FATAL: Patch file not found: {patch_to_open}", True)
+            if not os.path.exists(patch_file):
+                self._log(1, f"FATAL: Patch file not found: {patch_file}", True)
                 return 2
 
-            with open(patch_to_open, 'r', encoding='utf-8', errors='replace') as f:
+            with open(patch_file, 'r', encoding='utf-8', errors='replace') as f:
                 patch_files = PatchParser().parse_stream(f)
             
+            session_status = 0
             for pf in patch_files:
                 res = self._process_file(pf)
-                if res != 0 and not self.args.continue_on_fail: return res
-            return 0
+                if res != 0:
+                    if not self.args.continue_on_fail: return res
+                    session_status = 1
+            return session_status
         except Exception as e:
             self._log(1, f"FATAL: {str(e)}", True); return 2
             
     def _process_file(self, pf: PatchFile) -> int:
         base_dir = self.args.directory or os.getcwd()
-        target_name = self.args.target_file_override or pf.new_path
+        target_name = self.id_map.resolve_path(self.args.target_file_override or pf.new_path)
         if self.args.strip > 0:
-            target_name = os.sep.join(target_name.split(os.sep)[self.args.strip:])
+            target_name = os.sep.join(target_name.replace('/', os.sep).split(os.sep)[self.args.strip:])
         
         target_path = os.path.normpath(os.path.join(base_dir, target_name))
         
         if pf.is_rename:
             self.id_map.add_rename(pf.old_path, pf.new_path)
+            src = os.path.normpath(os.path.join(base_dir, pf.old_path))
+            if os.path.exists(target_path):
+                self._log(1, "FATAL: Destination already exists", True); return 2
             if not self.args.dry_run:
+                if not os.path.exists(src): return 2
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                os.replace(os.path.join(base_dir, pf.old_path), target_path)
-        
+                os.replace(src, target_path)
+
         if pf.new_path == "/dev/null":
             if not self.args.dry_run:
                 if not os.path.exists(target_path): 
-                    self._log(1, f"Hunk 1 match failed", True)
-                    return 2
+                    self._log(1, "Hunk 1 match failed", True); return 2
                 os.remove(target_path)
                 DirectoryCleaner.cleanup(os.path.dirname(target_path), base_dir, self.args.cleanup_ignore)
             return 0
 
-        content = []
+        lines = []
         if os.path.exists(target_path):
-            with open(target_path, 'r', encoding='utf-8', errors='replace') as f: content = f.readlines()
+            with open(target_path, 'r', encoding='utf-8', errors='replace') as f: lines = f.readlines()
         elif pf.old_path == "/dev/null": os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        else: 
-            self._log(1, f"Hunk 1 match failed", True)
-            return 2
+        else:
+            self._log(1, "Hunk 1 match failed", True); return 2
 
-        new_content = list(content)
+        work_buf = list(lines)
+        is_search = False
         for h in pf.hunks:
-            if h.is_binary:
-                if not self.args.dry_run:
-                    with open(target_path, 'wb') as f: f.write(h.binary_data)
-                continue
+            if h.old_start == 0: is_search = True
+            idxs = self.matcher.find_match(work_buf, h, self.args)
+            if not idxs: self._log(1, "Hunk 1 match failed", True); return 2
+            if len(idxs) > 1 and not self.args.global_apply: self._log(1, "Ambiguous match", True); return 127
             
-            indices = self.matcher.find_match(new_content, h, self.args)
-            if not indices: 
-                self._log(1, f"Hunk 1 match failed", True) # FIX 3: Error Message Alignment
-                return 2
-            if len(indices) > 1 and not self.args.global_apply: 
-                self._log(1, "Ambiguous match", True)
-                return 127 # FIX 3: Return 127
-            
-            for idx in reversed(indices): # FIX 4: Correct slicing for application
-                search_block = [l for l in h.lines if l.startswith(('-', ' '))]
-                del_count = len(search_block)
+            for idx in reversed(idxs):
+                search_len = len([l for l in h.lines if l.startswith(('-', ' '))])
                 adds = [l[1:] + '\n' for l in h.lines if l.startswith(('+', ' '))]
-                # If search_block is used as context, additions should be interleaved correctly. 
-                # Simplest robust replacement for unified:
-                new_content[idx : idx + del_count] = adds
-        
+                work_buf[idx : idx + search_len] = adds
+
         if not self.args.dry_run:
-            if self.args.backup and os.path.exists(target_path): 
-                shutil.copy2(target_path, target_path + ".orig")
-            with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(target_path), delete=False, encoding='utf-8') as tf:
-                tf.writelines(new_content); temp_path = tf.name
-            os.replace(temp_path, target_path)
+            if self.args.backup and os.path.exists(target_path): shutil.copy2(target_path, target_path + ".orig")
+            with tempfile.NamedTemporaryFile('w', dir=os.path.dirname(target_path), delete=False, encoding='utf-8', newline='') as tf:
+                tf.writelines(work_buf); os.replace(tf.name, target_path)
         
-        self._log(1, f"Applied: {target_name}"); return 0
+        msg = "Applied via full-file literal search" if is_search else "Applied"
+        self._log(1, f"{msg}: {target_name}")
+        return 0
 
 def main():
     parser = argparse.ArgumentParser(description="Flexible Unified Diff Patcher")
@@ -307,6 +344,12 @@ def main():
     parser.add_argument("--cleanup-ignore")
     parser.add_argument("--backup", action="store_true")
     parser.add_argument("--ignore-leading-whitespace", action="store_true")
-    sys.exit(PatcherOrchestrator(parser.parse_args()).run_session())
+    
+    args = parser.parse_args()
+    if args.patch_file == "apply":
+        args.patch_file = args.target_file_override
+        args.target_file_override = None
+        
+    sys.exit(PatcherOrchestrator(args).run_session())
 
 if __name__ == "__main__": main()

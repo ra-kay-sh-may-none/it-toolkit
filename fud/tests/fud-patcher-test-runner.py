@@ -193,10 +193,12 @@ class TestFUDPPatcher(unittest.TestCase):
 
     def test_F14_P31_Ambiguity_Positive_Global(self):
         self.write_src("dir2/file22.json", "active\nactive\n")
-        p = self.write_patch("p.patch", "--- dir2/file22.json\n+++ dir2/file22.json\n-active\n+inactive\n")
+        p = self.write_patch("ambig.patch", "--- dir2/file22.json\n+++ dir2/file22.json\n-active\n+inactive\n")
         res = self.run_patcher(["apply", p, "-d", self.src_path, "--global"])
         self.assertEqual(res.returncode, 0)
-        content = open(os.path.join(self.src_path, "dir2/file22.json")).read()
+        # FIX: Use Context Manager
+        with open(os.path.join(self.src_path, "dir2/file22.json"), 'r') as f:
+            content = f.read()
         self.assertEqual(content.count("inactive"), 2)
 
     def test_F1_P1_StrictPos_Positive(self):

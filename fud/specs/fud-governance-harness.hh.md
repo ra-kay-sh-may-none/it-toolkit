@@ -1,6 +1,7 @@
 #. REVISION CONTROL BLOCK:
 	##. Document Title: FUDP - AI Development Governance Harness.
-	##. Status: Mandatory Framework / Integrated Interface Lock.
+	##. Status: Mandatory Framework / Loop Breaker Integrated.
+	##. Revision: 1.6.0.
 	##. Format: HHMD (Hash Hierarchical Markdown).
 
 #. Pillar Document References:
@@ -40,17 +41,27 @@
 #. Core Class & Method Signatures (The Internal Lock):
 	##. 1. Class `PatcherOrchestrator`:
 		###. `__init__(self, args: argparse.Namespace)`
-		###. `run_session(self) -> int`: Main loop returning the session exit code.
-		###. `_pre_scan(self) -> bool`: The "Stop Mode" validation pass across all files.
+		###. `run_session(self) -> int`: Returns 0 (success), 1 (partial), 2 (fatal), 127 (ambiguous).
+		###. `_process_file(self, pf: PatchFile) -> int`: Returns per-file exit code.
 	##. 2. Class `PatchParser`:
 		###. `parse_stream(self, stream: TextIO) -> List[PatchFile]`
-		###. `_parse_hunk(self, lines: List[str]) -> Hunk`
 	##. 3. Class `Matcher`:
-		###. `find_match(self, target_lines: List[str], hunk: Hunk) -> List[int]`: Returns list of zero-based line indices.
+		###. `find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]`
 	##. 4. Class `IdentityMap`:
-		###. `resolve_path(self, path: str) -> str`: Returns the normalized current filesystem path.
+		###. `resolve_path(self, path: str) -> str`
 		###. `add_rename(self, old_path: str, new_path: str)`
-		###. `add_copy(self, src_path: str, dst_path: str)`
+
+#. Loop Breaker Logic Rules (Mandatory Implementation):
+	##. Rule 1: Header Isolation Contract:
+		###. The parser MUST extract paths by splitting on tabs (`\t`) and stripping whitespace.
+		###. Example: `--- a/file.py 2024-01-01` -> Result: `a/file.py`.
+	##. Rule 2: Normalization matching:
+		###. Comparisons MUST ignore `\r\n` vs `\n` by using `.rstrip('\r\n')` on all lines before comparison.
+	##. Rule 3: Search Mode Message Logic:
+		###. If `hunk.old_start == 0`, log `Applied via full-file literal search: <path>`.
+		###. If `hunk.old_start > 0`, log `Applied: <path>`.
+	##. Rule 4: Match Strictness:
+		###. If search context is provided but not found, return an EMPTY LIST `[]`, never a default index.
 
 #. Identity Map Schema:
 	##. Implementation: Flat dictionary `{ "normalized_original_path": "normalized_current_path" }`.
