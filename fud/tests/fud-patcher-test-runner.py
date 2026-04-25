@@ -6,13 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-class TestSprint1Resolution(unittest.TestCase):
+class TestSprint2Matching(unittest.TestCase):
     def setUp(self):
         self.test_root = tempfile.mkdtemp()
         self.src_dir = os.path.join(self.test_root, "src")
         os.makedirs(self.src_dir)
-        
-        # Point to the freshly generated src/hud-patcher.py
         base_path = Path(__file__).parent.parent
         self.patcher_exe = os.path.abspath(base_path / "src" / "hud-patcher.py")
 
@@ -23,25 +21,27 @@ class TestSprint1Resolution(unittest.TestCase):
         cmd = [sys.executable, self.patcher_exe] + args
         return subprocess.run(cmd, capture_output=True, text=True)
 
-    def test_pair_1_1_positive_strip_resolution(self):
-        # Header is "a/dir1/file1.py", we use -p1, should hit self.src_dir/dir1/file1.py
-        target = os.path.join(self.src_dir, "dir1", "file1.py")
-        os.makedirs(os.path.dirname(target))
-        with open(target, 'w') as f: f.write("test")
-        
-        # dummy.patch is required by CLI but not read yet in Sprint 1
-        res = self.run_p(["dummy.patch", "-d", self.src_dir, "-p1"])
+    def test_2_1_positive_exact_match(self):
+        target = os.path.join(self.src_dir, "file1.py")
+        with open(target, 'w', newline='') as f: f.write("line1\nline2\nline3\n")
+        patch = os.path.join(self.test_root, "test.patch")
+        with open(patch, 'w', newline='') as f:
+            f.write("--- file1.py\n+++ file1.py\n@@ -2,1 +2,1 @@\n-line2\n+modified\n")
+        res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
-        self.assertIn("Applied", res.stdout)
-        self.assertTrue(os.path.exists(target))
+        with open(target, 'r') as f: 
+            self.assertEqual(f.read(), "line1\nmodified\nline3\n")
 
-    def test_pair_1_2_positive_override(self):
-        override_file = os.path.join(self.test_root, "manual.txt")
-        with open(override_file, 'w') as f: f.write("manual")
-        
-        res = self.run_p(["dummy.patch", override_file])
-        self.assertEqual(res.returncode, 0)
-        self.assertTrue(os.path.exists(override_file))
+    def test_2_2_positive_offset_match(self):
+        target = os.path.join(self.src_dir, "file1.py")
+        with open(target, 'w') as f: f.write("n1\nn2\nn3\ntarget\n")
+        patch = os.path.join(self.test_root, "test.patch")
+        with open(patch, 'w') as f:
+            f.write("--- file1.py\n+++ file1.py\n@@ -1,1 +1,1 @@\n-target\n+found\n")
+        res_fail = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res_fail.returncode, 2)
+        res_pass = self.run_p([patch, "-d", self.src_dir, "--max-offset", "10"])
+        self.assertEqual(res_pass.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()
