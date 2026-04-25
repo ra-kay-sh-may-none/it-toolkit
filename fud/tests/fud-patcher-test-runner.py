@@ -67,5 +67,40 @@ class TestFUDPPatcher(unittest.TestCase):
         with open(os.path.join(self.src_dir, "b.py")) as f:
             self.assertEqual(f.read(), "updated\n")
 
+    def test_4_1_positive_fuzz_factor(self):
+        # Disk has v1.2, Patch has v1.0. Should pass with --fuzz=1
+        self.write_file("app.cfg", "version=1.2\nstatus=ok\n")
+        patch = os.path.join(self.test_root, "fuzz.patch")
+        with open(patch, 'w', newline='') as f:
+            f.write("--- app.cfg\n+++ app.cfg\n@@ -1,2 +1,2 @@\n-version=1.0\n+version=2.0\n status=ok\n")
+        
+        # Should fail with default fuzz 0
+        res_fail = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res_fail.returncode, 2)
+
+        # Should pass with fuzz 1
+        res_pass = self.run_p([patch, "-d", self.src_dir, "--fuzz", "1"])
+        self.assertEqual(res_pass.returncode, 0)
+        with open(os.path.join(self.src_dir, "app.cfg")) as f:
+            self.assertIn("version=2.0", f.read())
+
+    def test_4_2_positive_ignore_whitespace(self):
+        # Disk uses Tabs, Patch uses 4 Spaces
+        self.write_file("code.py", "\tprint('hello')\n")
+        patch = os.path.join(self.test_root, "ws.patch")
+        with open(patch, 'w', newline='') as f:
+            f.write("--- code.py\n+++ code.py\n@@ -1,1 +1,1 @@\n-    print('hello')\n+    print('world')\n")
+        
+        # Fail without flag
+        res_fail = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res_fail.returncode, 2)
+
+        # Pass with --ignore-leading-whitespace
+        res_pass = self.run_p([patch, "-d", self.src_dir, "--ignore-leading-whitespace"])
+        self.assertEqual(res_pass.returncode, 0)
+        with open(os.path.join(self.src_dir, "code.py")) as f:
+            # Should preserve the original indentation style (Tab)
+            self.assertEqual(f.read(), "\tprint('world')\n")
+
 if __name__ == "__main__":
     unittest.main()

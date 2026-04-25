@@ -79,15 +79,38 @@ class IdentityMap:
 
 class Matcher:
     def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]:
+        """Requirement ID: Search and Replace Logic (Sliding Window, Fuzz, and WS)"""
         search = [l[1:] for l in hunk.lines if l.startswith((' ', '-'))]
-        if not search: return [len(buffer)] if hunk.old_start == 0 else []
+        if not search:
+            return [len(buffer)] if hunk.old_start == 0 else []
+
         start_hint = max(0, hunk.old_start - 1)
+        max_off = args.max_offset
         matches = []
+
         for i in range(len(buffer) - len(search) + 1):
             offset = abs(i - start_hint)
-            if hunk.old_start != 0 and args.max_offset == 0 and offset != 0: continue
-            if args.max_offset > 0 and offset > args.max_offset: continue
-            if all(buffer[i+j].rstrip('\r\n') == search[j].rstrip('\r\n') for j in range(len(search))):
+            if hunk.old_start != 0 and max_off == 0 and offset != 0: continue
+            if max_off > 0 and offset > max_off: continue
+            
+            # SURGICAL FIX: Implement Fuzz and Indentation Relaxation
+            mismatches = 0
+            for j, s_line in enumerate(search):
+                b_line = buffer[i + j]
+                
+                # Rule: Indentation Relaxation vs. Exact Match
+                if args.ignore_leading_whitespace:
+                    b = b_line.strip()
+                    s = s_line.strip()
+                else:
+                    b = b_line.rstrip('\r\n')
+                    s = s_line.rstrip('\r\n')
+                
+                if b != s:
+                    mismatches += 1
+            
+            # Rule: Success if within Fuzz threshold
+            if mismatches <= args.fuzz:
                 matches.append(i)
                 if len(matches) > 1: break
         return matches
@@ -135,7 +158,7 @@ class PatcherOrchestrator:
             raise IOAbort(f"Atomic write failed: {str(e)}")
 
     def run_session(self) -> int:
-        """Requirement ID: Session Path Mapping and Rename Logic"""
+        """Requirement ID: Execution Strategy and Order of Operations"""
         try:
             # 1. Parse the patch file into objects
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
@@ -143,12 +166,8 @@ class PatcherOrchestrator:
             
             # 2. Iterate through each file section in the patch
             for pf in patch_files:
-                # Resolve the target name (this checks the IdentityMap for renames)
-                # For renames, we need to know where it starts (pf.old_path) 
-                # and where it ends (pf.new_path)
-                
+                # Handle Identities and Renames before Application
                 if pf.is_rename:
-                    # Identity Logic: Process the movement on disk and in the map
                     src = self.resolve_target_path(pf.old_path)
                     dst = self.resolve_target_path(pf.new_path)
                     
@@ -164,7 +183,7 @@ class PatcherOrchestrator:
                         os.makedirs(os.path.dirname(dst), exist_ok=True)
                         os.replace(src, dst)
                 
-                # Now resolve the "final" path for hunk application
+                # Resolve target (checking id_map) and read content
                 resolved = self.resolve_target_path(pf.new_path)
                 
                 if not os.path.exists(resolved):
@@ -182,13 +201,32 @@ class PatcherOrchestrator:
                         self._log(1, f"Hunk match failed for {resolved}", True)
                         return 2
                     
-                    # Sprint 2/3: Apply first match found
+                    # Sprint 2/3/4: Apply first match found
                     idx = idxs[0]
                     del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
-                    adds = [l[1:].rstrip('\r\n') + '\n' for l in h.lines if l.startswith(('+', ' '))]
+                    
+                    adds = []
+                    for hunk_line in h.lines:
+                        if hunk_line.startswith(('+', ' ')):
+                            # Initial payload extraction
+                            line_payload = hunk_line[1:].rstrip('\r\n')
+                            
+                            # SURGICAL FIX: Preserve original indentation if flag is set
+                            if self.args.ignore_leading_whitespace and idx < len(work_buf):
+                                original_line = work_buf[idx]
+                                # Capture everything before the first non-whitespace character
+                                indent = original_line[:len(original_line) - len(original_line.lstrip())]
+                                # Reconstruct using original indent + patch content (stripped of its own leading WS)
+                                final_line = indent + line_payload.lstrip() + '\n'
+                            else:
+                                final_line = line_payload + '\n'
+                                
+                            adds.append(final_line)
+                    
+                    # Update the buffer at the matched index
                     work_buf[idx : idx + del_c] = adds
                 
-                # 5. Commit changes to disk (Atomic Write from Sprint 1)
+                # 5. Commit changes to disk (Atomic Write)
                 if not self.args.dry_run:
                     self.atomic_write(resolved, work_buf)
                 
@@ -210,6 +248,8 @@ def main():
     parser.add_argument("--backup", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", "-v", action="count", default=1)
+    parser.add_argument("--fuzz", type=int, default=0)
+    parser.add_argument("--ignore-leading-whitespace", action="store_true")
     args = parser.parse_args()
     if args.patch_file == "apply":
         args.patch_file = args.target_file_override
