@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Flexible Unified Diff Patcher (FUDP)
-Sprint 1: Path Resolution & Atomicity
-Version: v0.2.0
+Target: Python 3.10+
+Requirement ID: fudp-governance-harness.hhmd Compliance
+Revision: 1.0.9 (Consolidated Iterative Build)
 """
 
 import os
@@ -12,8 +13,19 @@ import tempfile
 import shutil
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, TextIO
+from typing import List, Dict, Optional, TextIO
 import struct
+import logging
+
+# Setup persistent file logging
+log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patcher.log")
+logging.basicConfig(
+    filename=log_file,
+    filemode='a',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("FUDP")
 
 # --- CUSTOM EXCEPTIONS ---
 class PatcherError(Exception): pass
@@ -28,12 +40,12 @@ class Hunk:
     new_start: int
     new_len: int
     lines: List[str] = field(default_factory=list)
-    is_binary: bool = False # Added
-    binary_data: bytes = b"" # Added
+    is_binary: bool = False
+    binary_data: bytes = b""
+    similarity: int = 0
 
 class Base85Codec:
     B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
-    # KEY FIX: Ensure keys are integers (ASCII values)
     _DECODE_MAP = {char_code: index for index, char_code in enumerate(B85_CHARS)}
 
     @classmethod
@@ -41,7 +53,6 @@ class Base85Codec:
         raw = text_data.strip().encode('ascii')
         if not raw: return b""
         try:
-            # FIX: Ensure index exists in map
             if raw[0] not in cls._DECODE_MAP: return b""
             expected_len = cls._DECODE_MAP[raw[0]]
             payload = raw[1:]
@@ -55,55 +66,53 @@ class Base85Codec:
                 out.extend(struct.pack(">I", acc))
             return bytes(out[:expected_len])
         except Exception:
-            return b"" # Fail gracefully to let parser continue
-
+            return b""
 
 class PatchFile:
     def __init__(self):
         self.old_path: Optional[str] = None
         self.new_path: Optional[str] = None
         self.hunks: List[Hunk] = []
-        self.is_rename: bool = False # Added
+        self.is_rename: bool = False
+        self.similarity: int = 0
 
 class PatchParser:
     def parse_stream(self, stream: TextIO) -> List[PatchFile]:
-        """Requirement ID: State-Machine Parsing with Debug Tracing"""
         p_files = []
         cur_f = None
         in_bin = False
-        print(f"[DEBUG] Starting parse_stream...")
         for line in stream:
             l = line.rstrip('\r\n')
             if l.startswith('--- '):
                 cur_f = PatchFile()
-                cur_f.old_path = l[4:].split('\t')[0].strip()
-                p_files.append(cur_f)
-                in_bin = False
-                print(f"[DEBUG] Header found: {cur_f.old_path}")
+                path_parts = l[4:].split('\t')
+                cur_f.old_path = path_parts[0].strip()
+                p_files.append(cur_f); in_bin = False
             elif l.startswith('+++ ') and cur_f:
-                cur_f.new_path = l[4:].split('\t')[0].strip()
+                path_parts = l[4:].split('\t')
+                cur_f.new_path = path_parts[0].strip()
+            elif l.startswith('rename from ') and cur_f:
+                cur_f.old_path = l[12:].strip(); cur_f.is_rename = True
+            elif l.startswith('rename to ') and cur_f:
+                cur_f.new_path = l[10:].strip()
+            elif l.startswith('similarity index ') and cur_f:
+                cur_f.similarity = int(l[17:-1])
             elif l.startswith('GIT binary patch') and cur_f:
                 in_bin = True
                 h = Hunk(0, 0, 0, 0, is_binary=True)
-                h.binary_data = b"" 
+                h.binary_data = b""; h.similarity = cur_f.similarity
                 cur_f.hunks.append(h)
-                print(f"[DEBUG] Entered Binary Mode for {cur_f.new_path}")
             elif in_bin:
-                if not l.strip():
-                    in_bin = False
-                    print(f"[DEBUG] Exited Binary Mode. Total bytes: {len(cur_f.hunks[-1].binary_data)}")
-                    continue
-                if l.startswith(('literal', 'delta')):
-                    print(f"[DEBUG] Found Binary Type: {l}")
-                    cur_f.hunks[-1].binary_data = b"" # Reset for post-image
+                if not l.strip(): in_bin = False
+                elif l.startswith(('literal', 'delta')):
+                    cur_f.hunks[-1].binary_data = b""
                 else:
-                    decoded = Base85Codec.decode(l)
-                    cur_f.hunks[-1].binary_data += decoded
+                    cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
             elif l.startswith('@@') and cur_f:
                 m = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', l)
                 if m:
-                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), 
-                             int(m.group(3)), int(m.group(4) or 1))
+                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
+                    h.similarity = cur_f.similarity
                     cur_f.hunks.append(h)
             elif cur_f and cur_f.hunks:
                 cur_f.hunks[-1].lines.append(line)
@@ -114,9 +123,7 @@ class IdentityMap:
         self._map: Dict[str, str] = {}
 
     def _norm(self, p: str) -> str:
-        """Requirement ID: Session Path Mapping - Normalization Rule"""
         if not p or p == "/dev/null": return p
-        # Surgical Fix: Ensure forward slashes are handled before OS normalization
         return os.path.normcase(os.path.normpath(p.replace('/', os.sep)))
 
     def resolve_path(self, path: str) -> str:
@@ -131,145 +138,121 @@ class IdentityMap:
 
 class Matcher:
     def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]:
-        """Requirement ID: Search and Replace Logic (Sliding Window, Fuzz, and WS)"""
         search = [l[1:] for l in hunk.lines if l.startswith((' ', '-'))]
-        if not search:
-            return [len(buffer)] if hunk.old_start == 0 else []
-
+        if not search: return [len(buffer)] if hunk.old_start == 0 else []
         start_hint = max(0, hunk.old_start - 1)
         max_off = args.max_offset
+        if hasattr(hunk, 'similarity') and hunk.similarity == 100: max_off = max(max_off, 1000)
         matches = []
-
         for i in range(len(buffer) - len(search) + 1):
             offset = abs(i - start_hint)
             if hunk.old_start != 0 and max_off == 0 and offset != 0: continue
             if max_off > 0 and offset > max_off: continue
-            
-            # SURGICAL FIX: Implement Fuzz and Indentation Relaxation
             mismatches = 0
             for j, s_line in enumerate(search):
-                b_line = buffer[i + j]
-                
-                # Rule: Indentation Relaxation vs. Exact Match
+                b = buffer[i + j].rstrip('\r\n')
+                s = s_line.rstrip('\r\n')
                 if args.ignore_leading_whitespace:
-                    b = b_line.strip()
-                    s = s_line.strip()
-                else:
-                    b = b_line.rstrip('\r\n')
-                    s = s_line.rstrip('\r\n')
-                
-                if b != s:
-                    mismatches += 1
-            
-            # Rule: Success if within Fuzz threshold
+                    if b.strip() != s.strip(): mismatches += 1
+                elif b != s: mismatches += 1
             if mismatches <= args.fuzz:
                 matches.append(i)
-                if len(matches) > 1: break
+                if not getattr(args, 'global_apply', False) and len(matches) > 1: break
         return matches
 
 class PatcherOrchestrator:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.matcher = Matcher()
-        self.id_map = IdentityMap() # Added
+        self.id_map = IdentityMap()
 
     def _log(self, level: int, msg: str, is_err: bool = False):
         if self.args.verbose >= level:
             print(msg, file=sys.stderr if is_err else sys.stdout)
 
-    # Update resolve_target_path to check IdentityMap
     def resolve_target_path(self, header_path: Optional[str]) -> str:
         base_dir = self.args.directory or os.getcwd()
-        if self.args.target_file_override:
-            return os.path.abspath(self.args.target_file_override)
-        if not header_path:
-            raise PatcherError("No target file specified.")
-        
-        # FIX: Check Session Identity Map
+        if self.args.target_file_override: return os.path.abspath(self.args.target_file_override)
+        if not header_path: raise PatcherError("No target file specified.")
         mapped_path = self.id_map.resolve_path(header_path)
-        
         norm_path = os.path.normpath(mapped_path.replace('/', os.sep))
         parts = norm_path.split(os.sep)
-        if self.args.strip > 0:
-            parts = parts[self.args.strip:]
+        if self.args.strip > 0: parts = parts[self.args.strip:]
         return os.path.normpath(os.path.join(base_dir, os.sep.join(parts)))
 
     def atomic_write(self, target_path: str, data: any):
-        """Requirement ID: File Write Safety with Binary Support"""
         target_dir = os.path.dirname(target_path)
-        if not os.path.exists(target_dir):
-            os.makedirs(target_dir, exist_ok=True)
-
+        if not os.path.exists(target_dir): os.makedirs(target_dir, exist_ok=True)
         is_bin = isinstance(data, (bytes, bytearray))
-        mode = 'wb' if is_bin else 'w'
-        encoding = None if is_bin else 'utf-8'
-        newline = None if is_bin else ''
-
         fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix=".patch.", suffix=".tmp")
         try:
-            with os.fdopen(fd, mode, encoding=encoding, newline=newline) as tf:
-                if is_bin:
-                    tf.write(data)
-                else:
-                    tf.writelines(data)
-            
-            if self.args.backup and os.path.exists(target_path):
-                shutil.copy2(target_path, target_path + ".orig")
-            
+            with os.fdopen(fd, 'wb' if is_bin else 'w', encoding=None if is_bin else 'utf-8', newline=None if is_bin else '') as tf:
+                tf.write(data) if is_bin else tf.writelines(data)
+            if self.args.backup and os.path.exists(target_path): shutil.copy2(target_path, target_path + ".orig")
             os.replace(temp_path, target_path)
         except Exception as e:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise IOAbort(f"Atomic write failed: {str(e)}")
+            if os.path.exists(temp_path): os.remove(temp_path)
+            raise IOAbort(str(e))
 
     def run_session(self) -> int:
-        """Requirement ID: Orchestration with Path and Branch Tracing"""
         try:
-            print(f"[DEBUG] Patch File: {self.args.patch_file}")
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
                 patch_files = PatchParser().parse_stream(f)
-            
+            session_status = 0
             for pf in patch_files:
+                if pf.is_rename:
+                    src = self.resolve_target_path(pf.old_path)
+                    dst = self.resolve_target_path(pf.new_path)
+                    if os.path.exists(dst) and src != dst:
+                        self._log(1, f"FATAL: Destination exists: {dst}", True); return 2
+                    self.id_map.add_rename(pf.old_path, pf.new_path)
+                    if not self.args.dry_run:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        os.replace(src, dst)
+                
                 resolved = self.resolve_target_path(pf.new_path)
                 is_creation = (pf.old_path == "/dev/null")
-                print(f"[DEBUG] Resolving: {pf.new_path} -> {resolved} (Creation: {is_creation})")
-                
                 if not is_creation and not os.path.exists(resolved):
-                    print(f"[DEBUG] EXIT 2: File not found at {resolved}")
-                    return 2
+                    self._log(1, f"FATAL: File not found: {resolved}", True); return 2
 
-                # Check Hunks
                 if any(h.is_binary for h in pf.hunks):
-                    print(f"[DEBUG] Branch: BINARY application")
                     final_hunk = [h for h in pf.hunks if h.is_binary][-1]
                     if not self.args.dry_run:
                         if is_creation: os.makedirs(os.path.dirname(resolved), exist_ok=True)
                         self.atomic_write(resolved, final_hunk.binary_data)
-                        print(f"[DEBUG] Write Successful: {len(final_hunk.binary_data)} bytes")
-                    continue
+                    self._log(1, f"Applied binary: {pf.new_path}"); continue
 
-                print(f"[DEBUG] Branch: TEXT application")
                 work_buf = []
                 if os.path.exists(resolved):
-                    with open(resolved, 'r', encoding='utf-8') as f:
-                        work_buf = f.readlines()
+                    with open(resolved, 'r', encoding='utf-8', errors='replace') as f: work_buf = f.readlines()
+                elif is_creation: os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
                 for h in pf.hunks:
                     idxs = self.matcher.find_match(work_buf, h, self.args)
-                    print(f"[DEBUG] Match Results: {idxs}")
-                    if not idxs:
-                        print(f"[DEBUG] EXIT 2: Hunk match failed")
-                        return 2
-                    # ... rest of application ...
+                    if not idxs: self._log(1, f"FAIL: Hunk match failed", True); return 2
+                    if len(idxs) > 1 and not getattr(self.args, 'global_apply', False):
+                        self._log(1, "Ambiguous match", True); return 127
+                    
+                    for idx in reversed(idxs):
+                        del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
+                        adds = []
+                        for hunk_line in h.lines:
+                            if hunk_line.startswith(('+', ' ')):
+                                line_p = hunk_line[1:].rstrip('\r\n')
+                                if self.args.ignore_leading_whitespace and idx < len(work_buf):
+                                    orig = work_buf[idx]
+                                    indent = orig[:len(orig) - len(orig.lstrip())]
+                                    final = indent + line_p.lstrip() + '\n'
+                                else: final = line_p + '\n'
+                                adds.append(final)
+                        work_buf[idx : idx + del_c] = adds
                 
-                if not self.args.dry_run:
-                    self.atomic_write(resolved, work_buf)
-                
-            return 0
+                if not self.args.dry_run: self.atomic_write(resolved, work_buf)
+                msg = "Applied via full-file literal search" if all(h.old_start == 0 for h in pf.hunks) else "Applied"
+                self._log(1, f"{msg}: {pf.new_path}")
+            return session_status
         except Exception as e:
-            print(f"[DEBUG] EXCEPTION: {str(e)}")
-            return 2
-
+            self._log(1, f"FATAL: {str(e)}", True); return 2
 
 def main():
     parser = argparse.ArgumentParser()
@@ -282,6 +265,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", "-v", action="count", default=1)
     parser.add_argument("--fuzz", type=int, default=0)
+    parser.add_argument("--global", dest="global_apply", action="store_true")
     parser.add_argument("--ignore-leading-whitespace", action="store_true")
     args = parser.parse_args()
     if args.patch_file == "apply":
@@ -289,5 +273,4 @@ def main():
         args.target_file_override = None
     sys.exit(PatcherOrchestrator(args).run_session())
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
