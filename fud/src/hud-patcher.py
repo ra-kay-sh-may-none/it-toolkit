@@ -13,11 +13,13 @@ import shutil
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, TextIO
+import struct
 
 # --- CUSTOM EXCEPTIONS ---
 class PatcherError(Exception): pass
 class IOAbort(PatcherError): pass
 class IdentityConflict(PatcherError): pass
+class FormatError(PatcherError): pass
 
 @dataclass
 class Hunk:
@@ -26,6 +28,34 @@ class Hunk:
     new_start: int
     new_len: int
     lines: List[str] = field(default_factory=list)
+    is_binary: bool = False # Added
+    binary_data: bytes = b"" # Added
+
+class Base85Codec:
+    # Requirement: Git-specific Base85 alphabet
+    B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
+    # KEY FIX: Map ASCII integer values to their Git index
+    _DECODE_MAP = {char_code: index for index, char_code in enumerate(B85_CHARS)}
+
+    @classmethod
+    def decode(cls, text_data: str) -> bytes:
+        raw = text_data.strip().encode('ascii')
+        if not raw: return b""
+        try:
+            # FIX: raw[0] is the length prefix index
+            expected_len = cls._DECODE_MAP[raw[0]]
+            payload = raw[1:]
+            out = bytearray()
+            for i in range(0, len(payload), 5):
+                chunk = payload[i : i + 5]
+                if len(chunk) < 5: continue
+                acc = 0
+                for char_code in chunk:
+                    acc = acc * 85 + cls._DECODE_MAP[char_code]
+                out.extend(struct.pack(">I", acc))
+            return bytes(out[:expected_len])
+        except (KeyError, IndexError):
+            raise FormatError("Binary Base85 decode failed")
 
 class PatchFile:
     def __init__(self):
@@ -36,27 +66,50 @@ class PatchFile:
 
 class PatchParser:
     def parse_stream(self, stream: TextIO) -> List[PatchFile]:
+        """Requirement ID: State-Machine Patch Parsing with Binary Support"""
         p_files = []
         cur_f = None
+        in_bin = False
         for line in stream:
             l = line.rstrip('\r\n')
             if l.startswith('--- '):
                 cur_f = PatchFile()
+                # FIX: Take the first element of split to get a STRING, not a LIST
                 cur_f.old_path = l[4:].split('\t')[0].strip()
                 p_files.append(cur_f)
             elif l.startswith('+++ ') and cur_f:
+                # FIX: Same string isolation here
                 cur_f.new_path = l[4:].split('\t')[0].strip()
+            elif l.startswith('rename from ') and cur_f:
+                cur_f.old_path = l[12:].strip(); cur_f.is_rename = True
+            elif l.startswith('rename to ') and cur_f:
+                cur_f.new_path = l[10:].strip()
+            elif l.startswith('GIT binary patch') and cur_f:
+                in_bin = True
+                cur_f.hunks.append(Hunk(0, 0, 0, 0, is_binary=True))
+            elif in_bin:
+                if not l.strip():
+                    in_bin = False
+                    continue
+                if l.startswith(('literal', 'delta')):
+                    cur_f.hunks[-1].binary_type = l
+                else:
+                    # Accrue decoded bytes
+                    cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
             elif l.startswith('@@') and cur_f:
                 m = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', l)
                 if m:
-                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), int(m.group(3)), int(m.group(4) or 1))
+                    h = Hunk(int(m.group(1)), int(m.group(2) or 1), 
+                             int(m.group(3)), int(m.group(4) or 1))
                     cur_f.hunks.append(h)
             elif cur_f and cur_f.hunks:
                 cur_f.hunks[-1].lines.append(line)
-            elif l.startswith('rename from '):
-                cur_f.old_path = l[12:]; cur_f.is_rename = True
-            elif l.startswith('rename to '):
-                cur_f.new_path = l[10:]
+            elif l.startswith('GIT binary patch') and cur_f:
+                in_bin = True
+                h = Hunk(0, 0, 0, 0, is_binary=True)
+                # Ensure binary_data is initialized as empty bytes
+                h.binary_data = b"" 
+                cur_f.hunks.append(h)
         return p_files
 
 class IdentityMap:
@@ -64,8 +117,10 @@ class IdentityMap:
         self._map: Dict[str, str] = {}
 
     def _norm(self, p: str) -> str:
+        """Requirement ID: Session Path Mapping - Normalization Rule"""
         if not p or p == "/dev/null": return p
-        return os.path.normcase(os.path.normpath(p))
+        # Surgical Fix: Ensure forward slashes are handled before OS normalization
+        return os.path.normcase(os.path.normpath(p.replace('/', os.sep)))
 
     def resolve_path(self, path: str) -> str:
         norm = self._norm(path)
@@ -142,98 +197,107 @@ class PatcherOrchestrator:
             parts = parts[self.args.strip:]
         return os.path.normpath(os.path.join(base_dir, os.sep.join(parts)))
 
-    def atomic_write(self, target_path: str, lines: List[str]):
+    def atomic_write(self, target_path: str, data: any):
+        """Requirement ID: File Write Safety with Binary Support"""
         target_dir = os.path.dirname(target_path)
         if not os.path.exists(target_dir):
             os.makedirs(target_dir, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix=".patch.", suffix=".tmp", text=True)
+
+        is_bin = isinstance(data, (bytes, bytearray))
+        mode = 'wb' if is_bin else 'w'
+        encoding = None if is_bin else 'utf-8'
+        newline = None if is_bin else ''
+
+        fd, temp_path = tempfile.mkstemp(dir=target_dir, prefix=".patch.", suffix=".tmp")
         try:
-            with os.fdopen(fd, 'w', encoding='utf-8', newline='') as tf:
-                tf.writelines(lines)
+            with os.fdopen(fd, mode, encoding=encoding, newline=newline) as tf:
+                if is_bin:
+                    tf.write(data)
+                else:
+                    tf.writelines(data)
+            
             if self.args.backup and os.path.exists(target_path):
                 shutil.copy2(target_path, target_path + ".orig")
+            
             os.replace(temp_path, target_path)
         except Exception as e:
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             raise IOAbort(f"Atomic write failed: {str(e)}")
 
     def run_session(self) -> int:
-        """Requirement ID: Execution Strategy and Order of Operations"""
+        """Requirement ID: Execution Strategy with Binary Hunk Processing"""
         try:
-            # 1. Parse the patch file into objects
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
                 patch_files = PatchParser().parse_stream(f)
             
-            # 2. Iterate through each file section in the patch
             for pf in patch_files:
-                # Handle Identities and Renames before Application
                 if pf.is_rename:
                     src = self.resolve_target_path(pf.old_path)
                     dst = self.resolve_target_path(pf.new_path)
-                    
-                    # Negative Scenario 3.1: Collision Check
                     if os.path.exists(dst) and src != dst:
                         self._log(1, f"FATAL: Destination already exists: {dst}", True)
                         return 2
-                    
-                    # Update the session-wide mapping
                     self.id_map.add_rename(pf.old_path, pf.new_path)
-                    
                     if not self.args.dry_run:
                         os.makedirs(os.path.dirname(dst), exist_ok=True)
                         os.replace(src, dst)
                 
-                # Resolve target (checking id_map) and read content
                 resolved = self.resolve_target_path(pf.new_path)
+                is_creation = (pf.old_path == "/dev/null")
                 
-                if not os.path.exists(resolved):
+                if not is_creation and not os.path.exists(resolved):
                     self._log(1, f"FATAL: Target file not found: {resolved}", True)
                     return 2
 
-                # 3. Read content into buffer
-                with open(resolved, 'r', encoding='utf-8') as f:
-                    work_buf = f.readlines()
+                # FIX: Check if the file contains ANY binary hunks
+                has_binary = any(h.is_binary for h in pf.hunks)
+
+                if has_binary:
+                    # BINARY APPLICATION BRANCH
+                    # We assume literal mode (full replace) as per Sprint 5
+                    for h in pf.hunks:
+                        if h.is_binary and not self.args.dry_run:
+                            if is_creation:
+                                os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                            self.atomic_write(resolved, h.binary_data)
+                    self._log(1, f"Applied binary: {pf.new_path}")
+                    continue
+
+                # TEXT APPLICATION BRANCH
+                work_buf = []
+                if os.path.exists(resolved):
+                    with open(resolved, 'r', encoding='utf-8') as f:
+                        work_buf = f.readlines()
+                elif is_creation:
+                    os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
-                # 4. Apply each hunk in this file section
                 for h in pf.hunks:
-                    idxs = self.matcher.find_match(work_buf, h, self.args)
-                    if not idxs:
+                    match_indices = self.matcher.find_match(work_buf, h, self.args)
+                    if not match_indices:
                         self._log(1, f"Hunk match failed for {resolved}", True)
                         return 2
                     
-                    # Sprint 2/3/4: Apply first match found
-                    idx = idxs[0]
-                    del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
-                    
-                    adds = []
-                    for hunk_line in h.lines:
-                        if hunk_line.startswith(('+', ' ')):
-                            # Initial payload extraction
-                            line_payload = hunk_line[1:].rstrip('\r\n')
-                            
-                            # SURGICAL FIX: Preserve original indentation if flag is set
-                            if self.args.ignore_leading_whitespace and idx < len(work_buf):
-                                original_line = work_buf[idx]
-                                # Capture everything before the first non-whitespace character
-                                indent = original_line[:len(original_line) - len(original_line.lstrip())]
-                                # Reconstruct using original indent + patch content (stripped of its own leading WS)
-                                final_line = indent + line_payload.lstrip() + '\n'
-                            else:
-                                final_line = line_payload + '\n'
-                                
-                            adds.append(final_line)
-                    
-                    # Update the buffer at the matched index
-                    work_buf[idx : idx + del_c] = adds
+                    for idx in reversed(match_indices):
+                        del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
+                        adds = []
+                        for hunk_line in h.lines:
+                            if hunk_line.startswith(('+', ' ')):
+                                line_payload = hunk_line[1:].rstrip('\r\n')
+                                if self.args.ignore_leading_whitespace and idx < len(work_buf):
+                                    original_line = work_buf[idx]
+                                    indent = original_line[:len(original_line) - len(original_line.lstrip())]
+                                    final_line = indent + line_payload.lstrip() + '\n'
+                                else:
+                                    final_line = line_payload + '\n'
+                                adds.append(final_line)
+                        work_buf[idx : idx + del_c] = adds
                 
-                # 5. Commit changes to disk (Atomic Write)
                 if not self.args.dry_run:
                     self.atomic_write(resolved, work_buf)
-                
                 self._log(1, f"Applied: {pf.new_path}")
                 
             return 0
-            
         except Exception as e:
             self._log(1, f"FATAL: {str(e)}", True)
             return 2
