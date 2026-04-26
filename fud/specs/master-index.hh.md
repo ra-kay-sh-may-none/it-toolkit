@@ -10,9 +10,12 @@
 		###. F8: Reverse Application (-R)     | STATUS: DONE        | VER: v0.7.0
 		###. F9: Continue on Fail Strategy    | STATUS: DONE        | VER: v0.8.0
 		###. F10: Sequential Hunk Offsets     | STATUS: DONE        | VER: v0.8.0
+		###. Sprint 10: Permutation Batch 1   | STATUS: DONE        | VER: v0.9.0
+		###. F12: Simulated Dry-Run           | STATUS: IN-PROGRESS | VER: v0.10.0
+		###. F11: Binary Deltas               | STATUS: PENDING     | VER: v0.11.0
 
 	##. Coverage Status:
-		###. Current Tests Passing: 30
-		###. Target Tests (Sprint 10): 30
-		###. Global Coverage: 100% for F1-F10
+		###. Current Tests Passing: 40
+		###. Target Tests (Sprint 10): 42
+		###. Global Coverage: 100% for sprint 10
 		###. Total Project Goal: 62

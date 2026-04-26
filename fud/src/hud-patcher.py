@@ -59,10 +59,19 @@ class Base85Codec:
 
     @classmethod
     def decode(cls, text_data: str) -> bytes:
+        # SURGICAL FIX: We must strip leading/trailing whitespace 
+        # before identifying the length character.
         raw = text_data.strip().encode('ascii')
         if not raw: return b""
+        
+        # DIAGNOSTIC: Log the raw input string
+        logger.debug(f"Codec Input: {text_data.strip()}")
         try:
-            expected_len = cls._DECODE_MAP[raw[0]]
+            # FIX: Ensure we use the integer ASCII value of the first character
+            length_char = raw[0]
+            if length_char not in cls._DECODE_MAP:
+                return b""
+            expected_len = cls._DECODE_MAP[length_char]
             payload, out = raw[1:], bytearray()
             for i in range(0, len(payload), 5):
                 chunk = payload[i:i+5]
@@ -71,8 +80,13 @@ class Base85Codec:
                 for char_code in chunk:
                     acc = acc * 85 + cls._DECODE_MAP[char_code]
                 out.extend(struct.pack(">I", acc))
-            return bytes(out[:expected_len])
-        except Exception: return b""
+            # SURGICAL FIX: Force truncation to the exact byte count specified by the prefix
+            res = bytes(out[:expected_len])
+            logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
+            return res
+        except Exception as e:
+            logger.error(f"Codec Exception: {str(e)}")
+            return b""
 
 class IdentityMap:
     def __init__(self):
@@ -152,6 +166,11 @@ class PatchParser:
         p_files, cur_f, in_bin = [], None, False
         for line in stream:
             l = line.rstrip('\r\n')
+            
+            # --- STATE TRANSITIONS (Exit Binary Mode) ---
+            if l.startswith(('--- ', '@@ ')) and in_bin:
+                in_bin = False
+
             if l.startswith('--- '):
                 cur_f = PatchFile()
                 cur_f.old_path = l[4:].split('\t')[0].strip()
@@ -166,12 +185,31 @@ class PatchParser:
                 cur_f.similarity = int(l[17:-1])
             elif l.startswith('GIT binary patch') and cur_f:
                 in_bin = True
-                h = Hunk(0, 0, 0, 0, is_binary=True, similarity=cur_f.similarity)
-                h.binary_data = b""; cur_f.hunks.append(h)
+                if not any(h.is_binary for h in cur_f.hunks):
+                    cur_f.hunks.append(Hunk(0, 0, 0, 0, is_binary=True, similarity=cur_f.similarity))
+                logger.debug("Parser: Entered Binary Block")
+                continue # SURGICAL FIX: Do not process this line as data
             elif in_bin:
-                if not l.strip(): in_bin = False
-                elif l.startswith(('literal', 'delta')): cur_f.hunks[-1].binary_data = b""
-                else: cur_f.hunks[-1].binary_data += Base85Codec.decode(l)
+                if not l.strip(): continue
+                if l.startswith(('--- ', '+++ ', '@@ ')): 
+                    in_bin = False; continue
+
+                # SURGICAL FIX: Handle the literal/delta header correctly
+                if l.strip().startswith(('literal ', 'delta ')):
+                    # If we already have data, the second block is the pre-image. Stop.
+                    if cur_f.hunks[-1].binary_data:
+                        in_bin = False
+                    else:
+                        # First block: clear any accidental noise and skip this header line
+                        cur_f.hunks[-1].binary_data = b""
+                    continue
+                
+                # Only decode lines that are not headers
+                if not l.startswith('GIT binary patch'):
+                    decoded_chunk = Base85Codec.decode(l)
+                    if decoded_chunk:
+                        cur_f.hunks[-1].binary_data += decoded_chunk
+
             elif l.startswith('@@') and cur_f:
                 m = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@', l)
                 if m:
@@ -244,9 +282,10 @@ class PatcherOrchestrator:
 
             for pf in patch_files:
                 file_offset, file_failed = 0, False
-                target_raw = pf.new_path or pf.old_path
-                if self.args.include and not fnmatch.fnmatch(target_raw, self.args.include): continue
-                if self.args.exclude and fnmatch.fnmatch(target_raw, self.args.exclude): continue
+                # Glob filtering must use the non-null path for matching
+                filter_target = pf.new_path if pf.new_path != "/dev/null" else pf.old_path
+                if self.args.include and not fnmatch.fnmatch(filter_target, self.args.include): continue
+                if self.args.exclude and fnmatch.fnmatch(filter_target, self.args.exclude): continue
 
                 if pf.is_rename:
                     src, dst = self.resolve_target_path(pf.old_path), self.resolve_target_path(pf.new_path)
@@ -280,10 +319,11 @@ class PatcherOrchestrator:
                     else: return 2
                 
                 if any(h.is_binary for h in pf.hunks):
-                    final_hunk = [h for h in pf.hunks if h.is_binary][-1]
+                    # Requirement: Use the first binary hunk (the post-image)
+                    target_hunk = [h for h in pf.hunks if h.is_binary][0]
                     if not self.args.dry_run:
                         if is_c: os.makedirs(os.path.dirname(resolved), exist_ok=True)
-                        self.atomic_write(resolved, final_hunk.binary_data)
+                        self.atomic_write(resolved, target_hunk.binary_data)
                     self._log(1, f"Applied binary: {pf.new_path}"); continue
 
                 work_buf = []

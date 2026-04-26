@@ -16,6 +16,7 @@ class TestFUDPatcher(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.test_root)
+        # print(f"\n[INSPECT] Test files preserved at: {self.test_root}")
 
     def write_file(self, path, content, mode='w'):
         p = os.path.join(self.src_dir, path)
@@ -23,7 +24,9 @@ class TestFUDPatcher(unittest.TestCase):
         if 'b' in mode:
             with open(p, 'wb') as f: f.write(content)
         else:
-            with open(p, 'w', newline='') as f: f.write(content)
+            # Force UTF-8 and prevent Windows \r\n translation
+            with open(p, 'w', newline='\n', encoding='utf-8') as f: 
+                f.write(content)
         return p
 
     def run_p(self, args):
@@ -337,6 +340,164 @@ class TestFUDPatcher(unittest.TestCase):
         res = self.run_p([patch, "-d", self.src_dir, "--max-offset", "5"])
         self.assertEqual(res.returncode, 0)
         self.assertTrue(os.path.exists(os.path.join(self.src_dir, "f2.txt")))
+
+
+    def test_p1_rename_plus_fuzz(self):
+        """P1: Combine Identity move with Tolerance drift."""
+        target = self.write_file("old.py", "v1.2\nstatus=ok\n")
+        patch = self.write_file("p1.patch", "--- old.py\n+++ new.py\nrename from old.py\nrename to new.py\n@@ -1,1 +1,1 @@\n-v1.0\n+v2.0\n")
+        # Needs --fuzz 1 to match v1.2 vs v1.0
+        res = self.run_p([patch, "-d", self.src_dir, "--fuzz", "1"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "new.py")) as f:
+            self.assertIn("v2.0", f.read())
+
+    def test_p5_exclude_binary(self):
+        """P5: Ensure filtering works on non-text headers."""
+        self.write_file("data.bin", b"original", mode='wb')
+        patch = self.write_file("p5.patch", "--- data.bin\n+++ data.bin\nGIT binary patch\nliteral 5\nHcmZ>V&OEpl\n\n")
+        # Exclude the binary file
+        res = self.run_p([patch, "-d", self.src_dir, "--exclude", "*.bin"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "data.bin"), 'rb') as f:
+            self.assertEqual(f.read(), b"original") # Untouched
+
+    def test_p7_strip_depth_permutation(self):
+        """P7: Verify high-depth path stripping."""
+        self.write_file("deep/path/target.txt", "orig")
+        # Patch uses 3 levels (a/b/c)
+        patch = self.write_file("p7.patch", "--- a/b/target.txt\n+++ a/b/target.txt\n@@ -1,1 +1,1 @@\n-orig\n+new\n")
+        # -p2 should strip 'a/b/' leaving 'target.txt'.
+        # We target the 'deep/path' directory.
+        res = self.run_p([patch, "-d", os.path.join(self.src_dir, "deep/path"), "-p2"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "deep/path/target.txt")) as f:
+            self.assertEqual(f.read(), "new\n")
+
+    def test_p2_reverse_creation_existing(self):
+        """P2: Reverse a creation patch on a file that already exists (results in deletion)."""
+        target = self.write_file("exists.txt", "data\n")
+        patch = self.write_file("p2.patch", "--- /dev/null\n+++ exists.txt\n@@ -0,0 +1,1 @@\n+data\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--reverse"])
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse(os.path.exists(target))
+
+    def test_p3_global_reverse(self):
+        """P3: Reverse a global patch that added content to multiple lines."""
+        content = "line\ntarget\nline\ntarget\n"
+        target = self.write_file("multi.txt", content)
+        # Patch that adds "!" to "target"
+        patch = self.write_file("p3.patch", "--- multi.txt\n+++ multi.txt\n-target\n+target!\n")
+        # First, apply forward (global)
+        self.run_p([patch, "-d", self.src_dir, "--global"])
+        # Now, reverse it (global)
+        res = self.run_p([patch, "-d", self.src_dir, "--global", "--reverse"])
+        self.assertEqual(res.returncode, 0)
+        with open(target, 'r') as f:
+            self.assertEqual(f.read(), content)
+
+    def test_p4_ws_plus_fuzz(self):
+        """P4: Match a line with both indentation difference and context drift."""
+        # Disk has v1.2 with Tab, Patch has v1.0 with Spaces
+        self.write_file("code.py", "\tversion=1.2\n")
+        patch = self.write_file("p4.patch", "--- code.py\n+++ code.py\n@@ -1,1 +1,1 @@\n-    version=1.0\n+    version=2.0\n")
+        # Needs both flags
+        res = self.run_p([patch, "-d", self.src_dir, "--ignore-leading-whitespace", "--fuzz", "1"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "code.py")) as f:
+            self.assertEqual(f.read(), "\tversion=2.0\n")
+
+    def test_p6_continue_rename_collision(self):
+        """P6: File 1 rename fails (collision); verify File 2 still gets patched."""
+        self.write_file("file1.txt", "v1")
+        self.write_file("collision.txt", "blocked") # This blocks file1 -> collision.txt
+        self.write_file("file2.txt", "old")
+        patch_content = (
+            "--- file1.txt\n+++ collision.txt\nrename from file1.txt\nrename to collision.txt\n"
+            "--- file2.txt\n+++ file2.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        )
+        patch = self.write_file("p6.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir, "--continue"])
+        self.assertEqual(res.returncode, 1) # Partial Success
+        with open(os.path.join(self.src_dir, "file2.txt")) as f:
+            self.assertEqual(f.read(), "new\n")
+
+    def test_p8_include_plus_cleanup(self):
+        """P8: Delete two files in different dirs, but include only one. Verify parent dir survival."""
+        self.write_file("keep_dir/stay.txt", "data")
+        self.write_file("del_dir/go.txt", "data")
+        patch_content = (
+            "--- keep_dir/stay.txt\n+++ /dev/null\n"
+            "--- del_dir/go.txt\n+++ /dev/null\n"
+        )
+        patch = self.write_file("p8.patch", patch_content)
+        # Only allow deletion in del_dir
+        res = self.run_p([patch, "-d", self.src_dir, "--include", "del_dir/*"])
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.src_dir, "keep_dir/stay.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.src_dir, "del_dir")))
+
+    def test_p9_sequence_plus_reverse(self):
+        """P9: Reverse a 2-hunk patch where both hunks were originally shifted."""
+        original = "extra\nline1\nline2\n"
+        self.write_file("seq.txt", "extra\nnew1\nnew2\n") # File currently has 'new' state
+        patch_content = (
+            "--- seq.txt\n+++ seq.txt\n"
+            "@@ -1,1 +1,1 @@\n-line1\n+new1\n"
+            "@@ -2,1 +2,1 @@\n-line2\n+new2\n"
+        )
+        patch = self.write_file("p9.patch", patch_content)
+        # Reverse to restore 'line1/2' at the shifted position
+        res = self.run_p([patch, "-d", self.src_dir, "--reverse", "--max-offset", "5"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "seq.txt")) as f:
+            self.assertEqual(f.read(), original)
+
+    def test_p10_identity_plus_binary(self):
+        """P10: Move a binary file and apply a new literal hunk to it in one session."""
+        self.write_file("old.bin", b"seed", mode='wb')
+        # SURGICAL ADDITION: Create a visible copy to inspect the "pre-patch" state
+        # shutil.copy(os.path.join(self.src_dir, "old.bin"), os.path.join(self.src_dir, "old_backup.bin"))
+
+        patch_content = (
+            "--- old.bin\n"
+            "+++ new.bin\n"
+            "rename from old.bin\n"
+            "rename to new.bin\n"
+            "GIT binary patch\n"
+            "literal 5\n"
+            "50000000000\n\n"
+        )
+        patch = self.write_file("p10.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 0)
+        target = os.path.join(self.src_dir, "new.bin")
+        self.assertTrue(os.path.exists(target))
+        with open(target, 'rb') as f:
+            # prefix '5' + 10 zeros decodes to 5 null bytes
+            self.assertEqual(f.read(), b"\x00\x00\x00\x00\x00")
+
+    def test_p11_negative_invalid_base85_char(self):
+        """P11: Verify codec returns empty buffer on invalid Base85 alphabet char."""
+        # '?' is not in the Git Base85 alphabet
+        patch_content = (
+            "--- a.bin\n+++ a.bin\n"
+            "GIT binary patch\nliteral 1\n?cmZ>\n\n"
+        )
+        patch = self.write_file("bad_char.patch", patch_content)
+        # Should return Exit 2 because application fails due to empty buffer
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
+
+    def test_p12_negative_empty_binary_block(self):
+        """P12: Verify session handles binary header without any data blocks."""
+        patch_content = (
+            "--- a.bin\n+++ a.bin\n"
+            "GIT binary patch\n\n"
+        )
+        patch = self.write_file("no_data.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
 
 if __name__ == "__main__":
     unittest.main()
