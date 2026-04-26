@@ -60,7 +60,7 @@ class DeltaDecoder:
         """Requirement ID: F11 - Git Delta Instruction Decoder"""
         out = bytearray()
         pos = 0
-        # Git Delta Header: Source size and Target size (ignored for literal-lite)
+        
         def get_size(p):
             res, shift = 0, 0
             while p < len(delta_data):
@@ -72,25 +72,30 @@ class DeltaDecoder:
         
         if not delta_data: return b""
         try:
-            source_size, pos = get_size(pos)
-            target_size, pos = get_size(pos)
-        except (IndexError, struct.error): return b""
+            _, pos = get_size(pos) # Source Size
+            _, pos = get_size(pos) # Target Size
+        except IndexError: return b""
 
         while pos < len(delta_data):
             cmd = delta_data[pos]; pos += 1
             if cmd & 0x80: # COPY from base
                 off = size = 0
-                if cmd & 0x01: off = delta_data[pos]; pos += 1
-                if cmd & 0x02: off |= delta_data[pos] << 8; pos += 1
-                if cmd & 0x04: off |= delta_data[pos] << 16; pos += 1
-                if cmd & 0x08: off |= delta_data[pos] << 24; pos += 1
-                if cmd & 0x10: size = delta_data[pos]; pos += 1
-                if cmd & 0x20: size |= delta_data[pos] << 8; pos += 1
-                if cmd & 0x40: size |= delta_data[pos] << 16; pos += 1
+                try:
+                    if cmd & 0x01: off = delta_data[pos]; pos += 1
+                    if cmd & 0x02: off |= delta_data[pos] << 8; pos += 1
+                    if cmd & 0x04: off |= delta_data[pos] << 16; pos += 1
+                    if cmd & 0x08: off |= delta_data[pos] << 24; pos += 1
+                    if cmd & 0x10: size = delta_data[pos]; pos += 1
+                    if cmd & 0x20: size |= delta_data[pos] << 8; pos += 1
+                    if cmd & 0x40: size |= delta_data[pos] << 16; pos += 1
+                except IndexError: break # Safety break for truncated instructions
                 if size == 0: size = 0x10000
-                out.extend(base_data[off : off + size])
-            elif cmd > 0: # INSERT literal
-                out.extend(delta_data[pos : pos + cmd]); pos += cmd
+                # Ensure we don't copy more than available in base_data
+                end_pos = off + size
+                out.extend(base_data[off : min(len(base_data), end_pos)])
+            elif cmd > 0: # INSERT literal (Standard Command)
+                out.extend(delta_data[pos : pos + cmd])
+                pos += cmd
         return bytes(out)
 
 class Base85Codec:
@@ -119,7 +124,10 @@ class Base85Codec:
                     chunk = chunk + b"0" * (5 - len(chunk))
                 acc = 0
                 for char_code in chunk:
-                    acc = acc * 85 + cls._DECODE_MAP[char_code]
+                    if char_code in cls._DECODE_MAP:
+                        acc = acc * 85 + cls._DECODE_MAP[char_code]
+                    else:
+                        raise ValueError(f"Invalid B85 char: {chr(char_code)}")
                 out.extend(struct.pack(">I", acc))
             
             # SURGICAL FIX: Force exact length truncation
