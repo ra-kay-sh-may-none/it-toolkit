@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-class TestFUDPPatcher(unittest.TestCase):
+class TestFUDPatcher(unittest.TestCase):
     def setUp(self):
         self.test_root = tempfile.mkdtemp()
         self.src_dir = os.path.join(self.test_root, "src")
@@ -29,7 +29,7 @@ class TestFUDPPatcher(unittest.TestCase):
     def run_p(self, args):
         test_name = self.id().split('.')[-1]
         env = dict(os.environ)
-        env["FUDP_TRACE_ID"] = test_name
+        env["FUD_TRACE_ID"] = test_name
         cmd = [sys.executable, self.patcher_exe] + args
         res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=env)
         
@@ -205,6 +205,6 @@ class TestFUDPPatcher(unittest.TestCase):
         patch = self.write_file("corrupt_bin.patch", "--- a.bin\n+++ a.bin\nGIT binary patch\nnot_literal 5\n")
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 2)
-        
+
 if __name__ == "__main__":
     unittest.main()

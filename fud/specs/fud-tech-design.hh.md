@@ -2,7 +2,7 @@
 	##. Document Title: Flexible Unified Diff Patcher - Technical Design Doc.
 	##. Revision Number: 1.3.0.
 	##. Status: Golden Source / Technical Blueprint.
-	##. Format: HHMD (Hash Hierarchical Markdown).
+	##. Format: HHMD (.WITH FILE EXTENSION .hh.md) (Hash Hierarchical Markdown).
 
 #. Technical Stack & Environment:
 	##. Runtime: Python 3.10+.

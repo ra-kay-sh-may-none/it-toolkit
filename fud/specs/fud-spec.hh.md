@@ -2,7 +2,7 @@
 	##. Document Title: Flexible Unified Diff Patcher Specification.
 	##. Revision Number: 1.0.3.
 	##. Status: Golden Source / Finalized.
-	##. Format: HHMD (Hash Hierarchical Markdown).
+	##. Format: HHMD (.WITH FILE EXTENSION .hh.md) (Hash Hierarchical Markdown).
 
 #. Flexible Unified Diff Patcher Specification.
 	##. This document outlines the structural requirements for a flexible patcher:

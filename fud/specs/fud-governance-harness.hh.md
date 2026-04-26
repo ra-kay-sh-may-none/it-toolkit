@@ -1,8 +1,8 @@
 #. REVISION CONTROL BLOCK:
-	##. Document Title: FUDP - AI Development Governance Harness.
+	##. Document Title: FUD - AI Development Governance Harness.
 	##. Status: Mandatory Framework / Loop Breaker Integrated.
 	##. Revision: 1.6.0.
-	##. Format: HHMD (Hash Hierarchical Markdown).
+	##. Format: HHMD (.WITH FILE EXTENSION .hh.md) (Hash Hierarchical Markdown).
 
 #. Pillar Document References:
 	##. Functional Spec: `fud-spec.hh.md`

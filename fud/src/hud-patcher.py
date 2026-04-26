@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Flexible Unified Diff Patcher (FUDP)
+Flexible Unified Diff Patcher (FUD)
 Revision: 1.0.14 (Full Logger Integration)
 """
 
@@ -18,11 +18,11 @@ import logging
 # --- LOGGING INFRASTRUCTURE (Harness v1.6.0) ---
 class TraceFilter(logging.Filter):
     def filter(self, record):
-        record.trace_id = os.environ.get("FUDP_TRACE_ID", "CLI")
+        record.trace_id = os.environ.get("FUD_TRACE_ID", "CLI")
         return True
 
 log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patcher.log")
-logger = logging.getLogger("FUDP")
+logger = logging.getLogger("FUD")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 

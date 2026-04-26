@@ -2,7 +2,7 @@
 	##. Document Title: Grounding Rules with Universal Fencing and Paired Complexity.
 	##. Revision Number: 1.5.0.
 	##. Status: Active / Instructional.
-	##. Format: HHMD (Hash Hierarchical Markdown).
+	##. Format: HHMD (.WITH FILE EXTENSION .hh.md) (Hash Hierarchical Markdown).
 
 #. Core Grounding Rules for Test Case Generation.
 	##. Environmental Isolation Rule:
