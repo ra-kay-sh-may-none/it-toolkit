@@ -259,6 +259,20 @@ class PatcherOrchestrator:
         try:
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
                 patch_files = PatchParser().parse_stream(f)
+
+            if getattr(self.args, 'reverse', False):
+                for pf in patch_files:
+                    pf.old_path, pf.new_path = pf.new_path, pf.old_path
+                    for h in pf.hunks:
+                        h.old_start, h.new_start = h.new_start, h.old_start
+                        h.old_len, h.new_len = h.new_len, h.old_len
+                        new_lines = []
+                        for line in h.lines:
+                            if line.startswith('+'): new_lines.append('-' + line[1:])
+                            elif line.startswith('-'): new_lines.append('+' + line[1:])
+                            else: new_lines.append(line)
+                        h.lines = new_lines
+
             for pf in patch_files:
                 # --- SURGICAL ADDITION: GLOB FILTERING ---
                 target_raw = pf.new_path or pf.old_path
@@ -278,6 +292,7 @@ class PatcherOrchestrator:
                 resolved = self.resolve_target_path(pf.new_path)
                 if os.path.isdir(resolved): return 2                
                 # --- FEATURE 4: DELETION & CLEANUP ---
+                # Rule: File is deleted if new_path is null OR (if reversed) old_path is null
                 if pf.new_path == "/dev/null":
                     if not self.args.dry_run:
                         # Use pf.old_path to find the file that actually exists on disk
@@ -289,7 +304,10 @@ class PatcherOrchestrator:
                             DirectoryCleaner.cleanup(os.path.dirname(target_to_del), base_anchor, self.args.cleanup_ignore)
                     self._log(1, f"Deleted: {pf.old_path}")
                     continue
-                is_creation = (pf.old_path == "/dev/null")
+                
+                # Logic: In reverse mode, missing targets are treated as creations to allow restoration
+                is_creation = (pf.old_path == "/dev/null") or getattr(self.args, 'reverse', False)
+                
                 if not is_creation and not os.path.exists(resolved): return 2
                 
                 if any(h.is_binary for h in pf.hunks):
@@ -341,6 +359,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", "-v", action="count", default=1)
     parser.add_argument("--global", dest="global_apply", action="store_true")
+    parser.add_argument("--reverse", "-R", action="store_true")
     parser.add_argument("--ignore-leading-whitespace", action="store_true")
     parser.add_argument("--include", type=str)
     parser.add_argument("--exclude", type=str)

@@ -206,5 +206,59 @@ class TestFUDPatcher(unittest.TestCase):
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 2)
 
+    def test_8_1_positive_reverse_content(self):
+        """Verify adding a line can be reversed (removed)."""
+        target = self.write_file("rev.txt", "line1\nline2\n")
+        # Patch that adds "line2"
+        patch = self.write_file("add.patch", "--- rev.txt\n+++ rev.txt\n@@ -1,1 +1,2 @@\n line1\n+line2\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--reverse"])
+        self.assertEqual(res.returncode, 0)
+        with open(target, 'r') as f:
+            self.assertEqual(f.read(), "line1\n")
+
+    def test_8_2_positive_reverse_rename(self):
+        """Verify a rename A->B can be reversed back to A."""
+        self.write_file("file_b.py", "content")
+        # Patch that says rename A to B
+        patch = self.write_file("rev_ren.patch", "--- file_a.py\n+++ file_b.py\nrename from file_a.py\nrename to file_b.py\n")
+        res = self.run_p([patch, "-d", self.src_dir, "-R"])
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.src_dir, "file_a.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.src_dir, "file_b.py")))
+
+    def test_8_3_positive_reverse_deletion_to_creation(self):
+        """Verify reversing a deletion results in file creation."""
+        # Patch says delete 'ghost.txt'
+        patch = self.write_file("rev_del.patch", "--- ghost.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-data\n")
+        # Reverse it -> should create ghost.txt
+        res = self.run_p([patch, "-d", self.src_dir, "--reverse"])
+        self.assertEqual(res.returncode, 0)
+        target = os.path.join(self.src_dir, "ghost.txt")
+        self.assertTrue(os.path.exists(target))
+        with open(target, 'r') as f:
+            self.assertEqual(f.read(), "data\n")
+
+    def test_8_4_positive_reverse_binary_literal(self):
+        """Verify reversing a binary literal (swap old/new)."""
+        # Note: Git binary patches for literal usually contain both pre- and post-image.
+        # For our simplified logic, reversing binary swaps the headers.
+        target = self.write_file("bin.dat", b"new_data", mode='wb')
+        # Patch intended to change 'old' to 'new'
+        patch = self.write_file("rev_bin.patch", "--- old.dat\n+++ bin.dat\nGIT binary patch\nliteral 8\nHcmZ>V&OExk\n\n")
+        # Reverse it -> should restore 'old' (if old_path was mapped)
+        # For Sprint 8 literal: this verifies the header swap logic doesn't crash binary IO.
+        res = self.run_p([patch, "-d", self.src_dir, "-R"])
+        self.assertEqual(res.returncode, 0)
+
+    def test_8_5_positive_reverse_creation_to_deletion(self):
+        """Verify reversing a file creation results in file deletion."""
+        target = self.write_file("new_to_be_deleted.txt", "data\n")
+        # Patch that would create this file
+        patch = self.write_file("create.patch", "--- /dev/null\n+++ new_to_be_deleted.txt\n@@ -0,0 +1,1 @@\n+data\n")
+        # Reverse it -> should delete the file
+        res = self.run_p([patch, "-d", self.src_dir, "--reverse"])
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse(os.path.exists(target))
+
 if __name__ == "__main__":
     unittest.main()

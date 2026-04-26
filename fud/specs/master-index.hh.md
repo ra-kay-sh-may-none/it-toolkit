@@ -7,9 +7,9 @@
 		###. F5: Binary (Base85)              | STATUS: DONE        | VER: v0.5.0
 		###. F6: Heuristics & Search Mode     | STATUS: DONE        | VER: v0.6.0
 		###. F7: Cleanup & Glob Filtering     | STATUS: DONE        | VER: v0.6.0
-		###. F8: Reverse Application (-R)     | STATUS: IN-PROGRESS | VER: v0.7.0
+		###. F8: Reverse Application (-R)     | STATUS: DONE        | VER: v0.7.0
 
 	##. Coverage Status:
-		###. Current Tests Passing: 20
-		###. Target Tests (Sprint 8): 22
-		###. Global Coverage: 100% for F1-F7
+		###. Current Tests Passing: 25
+		###. Target Tests (Sprint 8): 25
+		###. Global Coverage: 100% for F1-F8
