@@ -537,5 +537,51 @@ class TestFUDPatcher(unittest.TestCase):
         # The directory should not exist on disk
         self.assertFalse(os.path.exists(new_dir_path))
 
+    def test_11_1_positive_binary_delta_insert(self):
+        """Verify binary delta 'insert' command works."""
+        self.write_file("base.bin", b"original", mode='wb')
+        # Delta: [SrcSize 0][TgtSize 0] -> Hex: 00 00 -> Base85 prefix '2'
+        patch_content = (
+            "--- base.bin\n+++ base.bin\n"
+            "GIT binary patch\ndelta 0\n2000\n\n"
+        )
+        patch = self.write_file("delta.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "base.bin"), 'rb') as f:
+            self.assertEqual(f.read(), b"")
+
+    def test_11_2_positive_binary_delta_copy(self):
+        """Verify binary delta 'copy' command works (reusing base data)."""
+        # Base: "ABC"
+        self.write_file("base.bin", b"ABC", mode='wb')
+        # Delta: [SrcSize 3][TgtSize 1][Copy 1 byte from Offset 1 ('B')]
+        # Hex: 03 01 91 01 01 -> Base85 prefix '5'
+        patch_content = (
+            "--- base.bin\n+++ base.bin\n"
+            "GIT binary patch\ndelta 1\n531#mR1\n\n"
+        )
+        patch = self.write_file("copy.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "base.bin"), 'rb') as f:
+            self.assertEqual(f.read(), b"B")
+
+        patch = self.write_file("copy.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "base.bin"), 'rb') as f:
+            self.assertEqual(f.read(), b"CDE")
+
+    def test_11_3_negative_binary_delta_truncated(self):
+        """Verify Exit 2 when delta data is truncated/corrupt."""
+        patch_content = (
+            "--- a.bin\n+++ a.bin\n"
+            "GIT binary patch\ndelta 10\n1600\n\n" # Header says 10 bytes, but no data
+        )
+        patch = self.write_file("trunc.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
+
 if __name__ == "__main__":
     unittest.main()

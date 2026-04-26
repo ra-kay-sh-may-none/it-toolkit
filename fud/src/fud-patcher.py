@@ -50,8 +50,48 @@ class Hunk:
     new_len: int
     lines: List[str] = field(default_factory=list)
     is_binary: bool = False
+    is_delta: bool = False
     binary_data: bytes = b""
     similarity: int = 0
+
+class DeltaDecoder:
+    @staticmethod
+    def apply(base_data: bytes, delta_data: bytes) -> bytes:
+        """Requirement ID: F11 - Git Delta Instruction Decoder"""
+        out = bytearray()
+        pos = 0
+        # Git Delta Header: Source size and Target size (ignored for literal-lite)
+        def get_size(p):
+            res, shift = 0, 0
+            while p < len(delta_data):
+                b = delta_data[p]; p += 1
+                res |= (b & 0x7f) << shift
+                shift += 7
+                if not (b & 0x80): break
+            return res, p
+        
+        if not delta_data: return b""
+        try:
+            source_size, pos = get_size(pos)
+            target_size, pos = get_size(pos)
+        except (IndexError, struct.error): return b""
+
+        while pos < len(delta_data):
+            cmd = delta_data[pos]; pos += 1
+            if cmd & 0x80: # COPY from base
+                off = size = 0
+                if cmd & 0x01: off = delta_data[pos]; pos += 1
+                if cmd & 0x02: off |= delta_data[pos] << 8; pos += 1
+                if cmd & 0x04: off |= delta_data[pos] << 16; pos += 1
+                if cmd & 0x08: off |= delta_data[pos] << 24; pos += 1
+                if cmd & 0x10: size = delta_data[pos]; pos += 1
+                if cmd & 0x20: size |= delta_data[pos] << 8; pos += 1
+                if cmd & 0x40: size |= delta_data[pos] << 16; pos += 1
+                if size == 0: size = 0x10000
+                out.extend(base_data[off : off + size])
+            elif cmd > 0: # INSERT literal
+                out.extend(delta_data[pos : pos + cmd]); pos += cmd
+        return bytes(out)
 
 class Base85Codec:
     B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
@@ -75,13 +115,16 @@ class Base85Codec:
             payload, out = raw[1:], bytearray()
             for i in range(0, len(payload), 5):
                 chunk = payload[i:i+5]
-                if len(chunk) < 5: continue
+                if len(chunk) < 5:
+                    chunk = chunk + b"0" * (5 - len(chunk))
                 acc = 0
                 for char_code in chunk:
                     acc = acc * 85 + cls._DECODE_MAP[char_code]
                 out.extend(struct.pack(">I", acc))
-            # SURGICAL FIX: Force truncation to the exact byte count specified by the prefix
+            
+            # SURGICAL FIX: Force exact length truncation
             res = bytes(out[:expected_len])
+
             logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
             return res
         except Exception as e:
@@ -194,9 +237,10 @@ class PatchParser:
                 if l.startswith(('--- ', '+++ ', '@@ ')): 
                     in_bin = False; continue
 
-                # SURGICAL FIX: Handle the literal/delta header correctly
-                if l.strip().startswith(('literal ', 'delta ')):
-                    # If we already have data, the second block is the pre-image. Stop.
+                # SURGICAL FIX: Identify if this is an incremental delta patch
+                clean_line = l.strip()
+                if clean_line.startswith(('literal ', 'delta ')):
+                    cur_f.hunks[-1].is_delta = clean_line.startswith('delta ')
                     if cur_f.hunks[-1].binary_data:
                         in_bin = False
                     else:
@@ -325,11 +369,30 @@ class PatcherOrchestrator:
                     else: return 2
                 
                 if any(h.is_binary for h in pf.hunks):
-                    # Requirement: Use the first binary hunk (the post-image)
-                    target_hunk = [h for h in pf.hunks if h.is_binary][0]
+                    # F11: Support both 'literal' and 'delta' binary hunks
+                    # Rule: Take the first binary hunk (index 0) as the post-image
+                    binary_hunks = [h for h in pf.hunks if h.is_binary]
+                    target_hunk = binary_hunks[0]
+                    
                     if not self.args.dry_run:
-                        if is_c: os.makedirs(os.path.dirname(resolved), exist_ok=True)
-                        self.atomic_write(resolved, target_hunk.binary_data)
+                        # Ensure directory exists for binary creations
+                        dir_to_make = os.path.dirname(resolved)
+                        if dir_to_make and not os.path.exists(dir_to_make):
+                            os.makedirs(dir_to_make, exist_ok=True)                        
+                        # Logic: Handle incremental delta vs full literal replacement
+                        try:
+                            if target_hunk.is_delta:
+                                base_data = b""
+                                if os.path.exists(resolved):
+                                    with open(resolved, 'rb') as f: base_data = f.read()
+                                final_data = DeltaDecoder.apply(base_data, target_hunk.binary_data)
+                            else:
+                                final_data = target_hunk.binary_data
+                            
+                            self.atomic_write(resolved, final_data)
+                        except Exception as e:
+                            logger.error(f"Binary application error: {e}")
+                            file_failed = True; break
                     self._log(1, f"Applied binary: {pf.new_path}"); continue
 
                 work_buf = []
