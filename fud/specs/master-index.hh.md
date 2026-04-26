@@ -6,7 +6,7 @@
 		###. F4: Tolerance (Fuzz/WS)          | STATUS: DONE        | VER: v0.4.0
 		###. F5: Binary (Base85)              | STATUS: DONE        | VER: v0.5.0
 		###. F6: Heuristics & Search Mode     | STATUS: DONE        | VER: v0.6.0
-		###. F7: Cleanup & Glob Filtering     | STATUS: IN-PROGRESS | VER: v0.6.0
+		###. F7: Cleanup & Glob Filtering     | STATUS: DONE        | VER: v0.6.0
 		###. F8: Reverse Application (-R)     | STATUS: PENDING     | VER: v0.7.0
 
 	##. Coverage Status:

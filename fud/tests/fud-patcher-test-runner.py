@@ -174,5 +174,37 @@ class TestFUDPPatcher(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertTrue(os.path.isdir(os.path.join(self.src_dir, "keep_dir")))
 
+    def test_7_5_negative_identity_conflict(self):
+        """Verify Exit 2 when a path is moved twice in one session."""
+        self.write_file("orig.txt", "data")
+        patch_content = (
+            "--- orig.txt\n+++ first.txt\nrename from orig.txt\nrename to first.txt\n"
+            "--- orig.txt\n+++ second.txt\nrename from orig.txt\nrename to second.txt\n"
+        )
+        patch = self.write_file("conflict.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("Conflict", res.stderr)
+
+    def test_7_6_negative_read_only_file(self):
+        """Verify Exit 2 when target file is read-only."""
+        import stat
+        target = self.write_file("readonly.txt", "locked")
+        # Make file read-only
+        os.chmod(target, stat.S_IREAD)
+        patch = self.write_file("mod.patch", "--- readonly.txt\n+++ readonly.txt\n@@ -1,1 +1,1 @@\n-locked\n+unlocked\n")
+        try:
+            res = self.run_p([patch, "-d", self.src_dir])
+            self.assertEqual(res.returncode, 2)
+        finally:
+            # Cleanup permissions so tearDown can delete the folder
+            os.chmod(target, stat.S_IWRITE)
+
+    def test_7_7_negative_malformed_binary_header(self):
+        """Verify Exit 2 on malformed binary metadata."""
+        patch = self.write_file("corrupt_bin.patch", "--- a.bin\n+++ a.bin\nGIT binary patch\nnot_literal 5\n")
+        res = self.run_p([patch, "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
+        
 if __name__ == "__main__":
     unittest.main()
