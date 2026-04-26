@@ -27,5 +27,5 @@
 
 #. File Synchronisation
 	##. master-index.hh.md: The single source of truth for current project state.
-	##. hud-patcher.py: The production target.
+	##. fud-patcher.py: The production target.
 	##. fud-patcher-test-runner.py: The verification target.

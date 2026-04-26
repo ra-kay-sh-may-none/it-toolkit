@@ -12,7 +12,7 @@ class TestFUDPatcher(unittest.TestCase):
         self.src_dir = os.path.join(self.test_root, "src")
         os.makedirs(self.src_dir)
         base_path = Path(__file__).parent.parent
-        self.patcher_exe = os.path.abspath(base_path / "src" / "hud-patcher.py")
+        self.patcher_exe = os.path.abspath(base_path / "src" / "fud-patcher.py")
 
     def tearDown(self):
         shutil.rmtree(self.test_root)
@@ -498,6 +498,44 @@ class TestFUDPatcher(unittest.TestCase):
         patch = self.write_file("no_data.patch", patch_content)
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 2)
+
+    # --- SPRINT 0.10.0: DRY-RUN SAFETY ---
+
+    def test_12_1_safety_dry_run_edit(self):
+        """Verify file content is NOT changed during dry-run."""
+        target = self.write_file("f1.txt", "original\n")
+        patch = self.write_file("edit.patch", "--- f1.txt\n+++ f1.txt\n@@ -1,1 +1,1 @@\n-original\n+changed\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--dry-run"])
+        self.assertEqual(res.returncode, 0)
+        with open(target, 'r') as f:
+            self.assertEqual(f.read(), "original\n")
+
+    def test_12_2_safety_dry_run_rename(self):
+        """Verify renames are NOT executed during dry-run."""
+        self.write_file("old.txt", "data")
+        patch = self.write_file("rename.patch", "--- old.txt\n+++ new.txt\nrename from old.txt\nrename to new.txt\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--dry-run"])
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.src_dir, "old.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.src_dir, "new.txt")))
+
+    def test_12_3_safety_dry_run_cleanup(self):
+        """Verify recursive cleanup is NOT executed during dry-run."""
+        self.write_file("empty_me/file.txt", "data")
+        patch = self.write_file("del.patch", "--- empty_me/file.txt\n+++ /dev/null\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--dry-run"])
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.src_dir, "empty_me/file.txt")))
+
+    def test_12_4_safety_dry_run_mkdir(self):
+        """Verify new directories are NOT created during dry-run."""
+        new_dir_path = os.path.join(self.src_dir, "ghost_dir")
+        # Patch that would create a file in a new directory
+        patch = self.write_file("mkdir.patch", "--- /dev/null\n+++ ghost_dir/new.txt\n@@ -0,0 +1,1 @@\n+data\n")
+        res = self.run_p([patch, "-d", self.src_dir, "--dry-run"])
+        self.assertEqual(res.returncode, 0)
+        # The directory should not exist on disk
+        self.assertFalse(os.path.exists(new_dir_path))
 
 if __name__ == "__main__":
     unittest.main()

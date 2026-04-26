@@ -305,7 +305,13 @@ class PatcherOrchestrator:
                     if self.args.continue_on_fail: session_status = 1; continue
                     else: return 2
 
+                # FIX: In dry-run, if the file was supposed to be renamed, it won't exist 
+                # at 'resolved' yet. We must acknowledge it is a "pending" dry move.
+                exists_on_disk = os.path.exists(resolved)
+                is_pending_dry_rename = self.args.dry_run and pf.is_rename
+
                 if pf.new_path == "/dev/null":
+
                     if not self.args.dry_run:
                         t = self.resolve_target_path(pf.old_path)
                         if os.path.exists(t):
@@ -314,7 +320,7 @@ class PatcherOrchestrator:
                     self._log(1, f"Deleted: {pf.old_path}"); continue
 
                 is_c = (pf.old_path == "/dev/null") or getattr(self.args, 'reverse', False)
-                if not is_c and not os.path.exists(resolved):
+                if not is_c and not exists_on_disk and not is_pending_dry_rename:
                     if self.args.continue_on_fail: session_status = 1; continue
                     else: return 2
                 
@@ -329,9 +335,11 @@ class PatcherOrchestrator:
                 work_buf = []
                 if os.path.exists(resolved):
                     with open(resolved, 'r', encoding='utf-8', errors='replace') as f: work_buf = f.readlines()
-                elif is_c: os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                elif is_c and not self.args.dry_run:
+                    os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
                 for h in pf.hunks:
+
                     idxs = self.matcher.find_match(work_buf, h, self.args, file_offset)
                     if not idxs: file_failed = True; break
                     if len(idxs) > 1 and not getattr(self.args, 'global_apply', False): session_status = 127; file_failed = True; break
