@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Flexible Unified Diff Patcher (FUD)
-Revision: 1.0.14 (Full Logger Integration)
+Revision: 1.0.15 (Sprint 9: Strategy & Sequential Intelligence)
 """
 
 import os
@@ -26,14 +26,11 @@ logger = logging.getLogger("FUD")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-# Handler 1: The Persistent File Log (All details + Trace ID)
 fh = logging.FileHandler(log_path, mode='a', encoding='utf-8')
 fh.addFilter(TraceFilter())
 fh.setFormatter(logging.Formatter('%(asctime)s - [%(trace_id)s] - %(levelname)s - %(message)s'))
 logger.addHandler(fh)
 
-# Handler 2: The Console (User-facing only)
-# We map self._log calls to this handler via the Orchestrator
 ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
 ch.setFormatter(logging.Formatter('%(message)s'))
@@ -56,54 +53,6 @@ class Hunk:
     binary_data: bytes = b""
     similarity: int = 0
 
-class DirectoryCleaner:
-    @staticmethod
-    def cleanup(target_dir: str, root: str, ignore_pattern: Optional[str] = None):
-        """Requirement ID: Feature 4 - Recursive Parent Removal (DIAGNOSTIC)"""
-        import fnmatch
-        curr = os.path.abspath(target_dir)
-        base = os.path.abspath(root)
-        
-        logger.info(f"Cleanup Started: curr={curr}, base={base}")
-        
-        while curr != base:
-            # DIAGNOSTIC: Check why the loop might exit
-            if not curr.startswith(base):
-                logger.error(f"Cleanup ABORT: curr no longer starts with base. curr={curr}")
-                break
-                
-            if not os.path.isdir(curr):
-                logger.error(f"Cleanup ABORT: {curr} is not a directory")
-                break
-            
-            items = os.listdir(curr)
-            
-            # Logic: If any file matches the ignore pattern, the directory SURVIVES
-            if ignore_pattern and any(fnmatch.fnmatch(i, ignore_pattern) for i in items):
-                break
-
-            if not items:
-                try:
-                    for i in items:
-                        p = os.path.join(curr, i)
-                        if os.path.isdir(p): shutil.rmtree(p)
-                        else: os.remove(p)
-                    
-                    os.rmdir(curr)
-                    logger.info(f"Cleanup SUCCESS: Removed {curr}")
-                    
-                    # Move to parent
-                    old_curr = curr
-                    curr = os.path.dirname(curr)
-                    if curr == old_curr: # Root reached
-                        break
-                except OSError as e:
-                    logger.error(f"Cleanup OSError at {curr}: {str(e)}")
-                    break
-            else:
-                logger.info(f"Cleanup STOP: {curr} is not empty (remaining={remaining})")
-                break
-
 class Base85Codec:
     B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
     _DECODE_MAP = {char_code: index for index, char_code in enumerate(B85_CHARS)}
@@ -123,9 +72,7 @@ class Base85Codec:
                     acc = acc * 85 + cls._DECODE_MAP[char_code]
                 out.extend(struct.pack(">I", acc))
             return bytes(out[:expected_len])
-        except Exception as e:
-            logger.debug(f"Codec Error: {str(e)}")
-            return b""
+        except Exception: return b""
 
 class IdentityMap:
     def __init__(self):
@@ -148,12 +95,31 @@ class IdentityMap:
             raise IdentityConflict(f"Path Conflict: {old_path}")
         self._map[norm_old] = norm_new
 
+class DirectoryCleaner:
+    @staticmethod
+    def cleanup(target_dir: str, root: str, ignore_pattern: Optional[str] = None):
+        import fnmatch
+        curr = os.path.abspath(target_dir)
+        base = os.path.abspath(root)
+        while curr != base and curr.startswith(base):
+            if not os.path.isdir(curr): break
+            items = os.listdir(curr)
+            if ignore_pattern and any(fnmatch.fnmatch(i, ignore_pattern) for i in items): break
+            if not items:
+                try:
+                    os.rmdir(curr)
+                    curr = os.path.dirname(curr)
+                except OSError: break
+            else: break
+
 class Matcher:
-    def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace) -> List[int]:
+    def find_match(self, buffer: List[str], hunk: Hunk, args: argparse.Namespace, current_offset: int = 0) -> List[int]:
+        """Requirement ID: F10 - Search with cumulative session offset"""
         search = [l[1:] for l in hunk.lines if l.startswith((' ', '-'))]
         if not search: return [len(buffer)] if hunk.old_start == 0 else []
         
-        start_hint = max(0, hunk.old_start - 1)
+        # Apply sequential offset to the starting hint
+        start_hint = max(0, (hunk.old_start + current_offset) - 1)
         max_off = args.max_offset
         if hasattr(hunk, 'similarity') and hunk.similarity == 100: max_off = max(max_off, 1000)
 
@@ -161,6 +127,8 @@ class Matcher:
         for i in range(len(buffer) - len(search) + 1):
             offset = abs(i - start_hint)
             if hunk.old_start != 0:
+                # Rule: If max_off is 0 (strict mode), only allow matches where offset is 0.
+                # If max_off > 0, allow matches within that distance from the start_hint.
                 if max_off == 0 and offset != 0: continue
                 if max_off > 0 and offset > max_off: continue
             
@@ -173,9 +141,10 @@ class Matcher:
             
             if mismatches <= args.fuzz:
                 matches.append(i)
+                logger.debug(f"Matcher SUCCESS: Match found at index {i} with offset {offset}")
                 if not getattr(args, 'global_apply', False) and len(matches) > 1: break
         
-        logger.debug(f"Matcher: Found {len(matches)} hits for {hunk.old_start}")
+        logger.debug(f"Matcher FINAL: Found {len(matches)} total hits for target line {hunk.old_start}")
         return matches
 
 class PatchParser:
@@ -225,7 +194,6 @@ class PatcherOrchestrator:
 
     def _log(self, level, msg, is_err=False):
         if self.args.verbose >= level:
-            # We print to stderr for FATAL/FAIL to satisfy test runner expectations
             print(msg, file=sys.stderr if is_err else sys.stdout)
 
     def resolve_target_path(self, header_path: str) -> str:
@@ -256,6 +224,7 @@ class PatcherOrchestrator:
     def run_session(self) -> int:
         import fnmatch
         logger.info(f"Session Start: {self.args.patch_file}")
+        session_status = 0
         try:
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
                 patch_files = PatchParser().parse_stream(f)
@@ -274,58 +243,64 @@ class PatcherOrchestrator:
                         h.lines = new_lines
 
             for pf in patch_files:
-                # --- SURGICAL ADDITION: GLOB FILTERING ---
+                file_offset, file_failed = 0, False
                 target_raw = pf.new_path or pf.old_path
-                if self.args.include and not fnmatch.fnmatch(target_raw, self.args.include):
-                    continue
-                if self.args.exclude and fnmatch.fnmatch(target_raw, self.args.exclude):
-                    continue
+                if self.args.include and not fnmatch.fnmatch(target_raw, self.args.include): continue
+                if self.args.exclude and fnmatch.fnmatch(target_raw, self.args.exclude): continue
 
                 if pf.is_rename:
                     src, dst = self.resolve_target_path(pf.old_path), self.resolve_target_path(pf.new_path)
-                    if os.path.exists(dst) and src != dst: return 2
-                    self.id_map.add_rename(pf.old_path, pf.new_path)
-                    if not self.args.dry_run:
-                        if not os.path.exists(src): return 2
-                        os.makedirs(os.path.dirname(dst), exist_ok=True); os.replace(src, dst)
+                    if os.path.exists(dst) and src != dst: file_failed = True
+                    else:
+                        self.id_map.add_rename(pf.old_path, pf.new_path)
+                        if not self.args.dry_run:
+                            if not os.path.exists(src): file_failed = True
+                            else: os.makedirs(os.path.dirname(dst), exist_ok=True); os.replace(src, dst)
                 
+                if file_failed:
+                    if self.args.continue_on_fail: session_status = 1; continue
+                    else: return 2
+
                 resolved = self.resolve_target_path(pf.new_path)
-                if os.path.isdir(resolved): return 2                
-                # --- FEATURE 4: DELETION & CLEANUP ---
-                # Rule: File is deleted if new_path is null OR (if reversed) old_path is null
+                if os.path.isdir(resolved):
+                    if self.args.continue_on_fail: session_status = 1; continue
+                    else: return 2
+
                 if pf.new_path == "/dev/null":
                     if not self.args.dry_run:
-                        # Use pf.old_path to find the file that actually exists on disk
-                        target_to_del = self.resolve_target_path(pf.old_path)
-                        if os.path.exists(target_to_del):
-                            os.remove(target_to_del)
-                            # Anchor cleanup to the directory of the file we just deleted
-                            base_anchor = self.args.directory or os.getcwd()
-                            DirectoryCleaner.cleanup(os.path.dirname(target_to_del), base_anchor, self.args.cleanup_ignore)
-                    self._log(1, f"Deleted: {pf.old_path}")
-                    continue
-                
-                # Logic: In reverse mode, missing targets are treated as creations to allow restoration
-                is_creation = (pf.old_path == "/dev/null") or getattr(self.args, 'reverse', False)
-                
-                if not is_creation and not os.path.exists(resolved): return 2
+                        t = self.resolve_target_path(pf.old_path)
+                        if os.path.exists(t):
+                            os.remove(t)
+                            DirectoryCleaner.cleanup(os.path.dirname(t), self.args.directory or os.getcwd(), self.args.cleanup_ignore)
+                    self._log(1, f"Deleted: {pf.old_path}"); continue
+
+                is_c = (pf.old_path == "/dev/null") or getattr(self.args, 'reverse', False)
+                if not is_c and not os.path.exists(resolved):
+                    if self.args.continue_on_fail: session_status = 1; continue
+                    else: return 2
                 
                 if any(h.is_binary for h in pf.hunks):
                     final_hunk = [h for h in pf.hunks if h.is_binary][-1]
                     if not self.args.dry_run:
-                        os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                        if is_c: os.makedirs(os.path.dirname(resolved), exist_ok=True)
                         self.atomic_write(resolved, final_hunk.binary_data)
                     self._log(1, f"Applied binary: {pf.new_path}"); continue
 
                 work_buf = []
                 if os.path.exists(resolved):
                     with open(resolved, 'r', encoding='utf-8', errors='replace') as f: work_buf = f.readlines()
-                elif is_creation: os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                elif is_c: os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
                 for h in pf.hunks:
-                    idxs = self.matcher.find_match(work_buf, h, self.args)
-                    if not idxs: self._log(1, "FAIL: Hunk match failed", True); return 2
-                    if len(idxs) > 1 and not getattr(self.args, 'global_apply', False): return 127
+                    idxs = self.matcher.find_match(work_buf, h, self.args, file_offset)
+                    if not idxs: file_failed = True; break
+                    if len(idxs) > 1 and not getattr(self.args, 'global_apply', False): session_status = 127; file_failed = True; break
+                    
+                    # Update offset for next hunk using the first integer match in the list
+                    if not is_c and h.old_start > 0 and idxs:
+                        # Logic: Extract the first match to calculate the cumulative shift
+                        file_offset = idxs[0] - (h.old_start - 1)
+
                     for idx in reversed(idxs):
                         del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
                         adds = []
@@ -338,10 +313,15 @@ class PatcherOrchestrator:
                                     adds.append(indent + p.lstrip() + '\n')
                                 else: adds.append(p + '\n')
                         work_buf[idx : idx + del_c] = adds
+                
+                if file_failed:
+                    if self.args.continue_on_fail: session_status = 1; continue
+                    else: return session_status or 2
+
                 if not self.args.dry_run: self.atomic_write(resolved, work_buf)
                 msg = "Applied via full-file literal search" if any(h.old_start == 0 and not h.is_binary for h in pf.hunks) else "Applied"
                 self._log(1, f"{msg}: {pf.new_path}")
-            return 0
+            return session_status
         except Exception as e:
             logger.error(f"Fatal: {str(e)}")
             self._log(1, f"FATAL: {str(e)}", True)
@@ -354,12 +334,13 @@ def main():
     parser.add_argument("--directory", "-d", type=str)
     parser.add_argument("--strip", "-p", type=int, default=0)
     parser.add_argument("--max-offset", type=int, default=0)
-    parser.add_argument("--fuzz", type=int, default=0)
     parser.add_argument("--backup", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", "-v", action="count", default=1)
+    parser.add_argument("--fuzz", type=int, default=0)
     parser.add_argument("--global", dest="global_apply", action="store_true")
     parser.add_argument("--reverse", "-R", action="store_true")
+    parser.add_argument("--continue", dest="continue_on_fail", action="store_true")
     parser.add_argument("--ignore-leading-whitespace", action="store_true")
     parser.add_argument("--include", type=str)
     parser.add_argument("--exclude", type=str)

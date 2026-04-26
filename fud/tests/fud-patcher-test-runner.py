@@ -34,13 +34,24 @@ class TestFUDPatcher(unittest.TestCase):
         res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=env)
         
         if res.returncode != 0:
-            print(f"\n--- [FAIL] {test_name} ---")
-            print(f"STDERR: {res.stderr}")
-            log_path = os.path.join(os.path.dirname(self.patcher_exe), "patcher.log")
-            if os.path.exists(log_path):
-                with open(log_path, 'r', encoding='utf-8') as f:
-                    matching_logs = [l for l in f if f"[{test_name}]" in l]
-                    print(f"--- LOG TRACE ---\n{''.join(matching_logs[-10:])}")
+            # Persistent Failure Logging
+            fail_log = os.path.join(os.path.dirname(__file__), "test_failures.log")
+            with open(fail_log, "a", encoding="utf-8") as fl:
+                fl.write(f"\n{'='*80}\n")
+                fl.write(f"FAILURE IN: {test_name}\n")
+                fl.write(f"COMMAND: {' '.join(args)}\n")
+                fl.write(f"EXIT CODE: {res.returncode}\n")
+                fl.write(f"{'-'*40}\nSTDERR:\n{res.stderr}\n")
+                fl.write(f"{'-'*40}\nSTDOUT:\n{res.stdout}\n")
+                
+                # Pull the specific trace from patcher.log
+                patcher_log = os.path.join(os.path.dirname(self.patcher_exe), "patcher.log")
+                if os.path.exists(patcher_log):
+                    with open(patcher_log, 'r', encoding='utf-8') as pl:
+                        trace = [l for l in pl if f"[{test_name}]" in l]
+                        fl.write(f"{'-'*40}\nPATCHER TRACE:\n{''.join(trace)}\n")
+
+            print(f"\n--- [FAIL] {test_name} (Details written to test_failures.log) ---")
         return res
 
     # --- SPRINT 2: MATCHING ---
@@ -259,6 +270,73 @@ class TestFUDPatcher(unittest.TestCase):
         res = self.run_p([patch, "-d", self.src_dir, "--reverse"])
         self.assertEqual(res.returncode, 0)
         self.assertFalse(os.path.exists(target))
+
+    def test_9_1_positive_continue_on_fail(self):
+        """Verify session moves to file 2 if file 1 fails with --continue."""
+        self.write_file("file1.txt", "v1")
+        self.write_file("file2.txt", "v1")
+        # Patch where hunk 1 mismatches file1, but hunk 2 matches file2
+        patch_content = (
+            "--- file1.txt\n+++ file1.txt\n@@ -1,1 +1,1 @@\n-wrong\n+new\n"
+            "--- file2.txt\n+++ file2.txt\n@@ -1,1 +1,1 @@\n-v1\n+v2\n"
+        )
+        patch = self.write_file("cont.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir, "--continue"])
+        self.assertEqual(res.returncode, 1) # Exit 1 for Partial Success
+        with open(os.path.join(self.src_dir, "file2.txt")) as f:
+            self.assertEqual(f.read(), "v2\n")
+
+    def test_10_1_positive_sequential_offsets(self):
+        """Verify Hunk 2 uses the offset found by Hunk 1."""
+        # Content shifted by 1 line
+        self.write_file("seq.txt", "extra_line\nline1\nline2\n")
+        # Patch expects lines at 1 and 2
+        patch_content = (
+            "--- seq.txt\n+++ seq.txt\n"
+            "@@ -1,1 +1,1 @@\n-line1\n+new1\n"
+            "@@ -2,1 +2,1 @@\n-line2\n+new2\n"
+        )
+        patch = self.write_file("seq.patch", patch_content)
+        # Offset 0 means strict positional matching
+        # Without sequential tracking, Hunk 2 would fail at line 2.
+        res = self.run_p([patch, "-d", self.src_dir, "--max-offset", "5"])
+        self.assertEqual(res.returncode, 0)
+
+    def test_9_2_positive_continue_on_ambiguity(self):
+        """Verify --continue skips files that return Exit 127 (Ambiguity)."""
+        self.write_file("ambig.txt", "common\ncommon\n")
+        self.write_file("next.txt", "v1\n")
+        # File 1 is ambiguous (should return 127 inside the loop)
+        # File 2 is simple. With --continue, session should end with Exit 1.
+        patch_content = (
+            "--- ambig.txt\n+++ ambig.txt\n-common\n+unique\n"
+            "--- next.txt\n+++ next.txt\n@@ -1,1 +1,1 @@\n-v1\n+v2\n"
+        )
+        patch = self.write_file("cont_ambig.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir, "--continue"])
+        self.assertEqual(res.returncode, 1)
+        with open(os.path.join(self.src_dir, "next.txt")) as f:
+            self.assertEqual(f.read(), "v2\n")
+
+    def test_9_3_negative_continue_fatal_exception(self):
+        """Verify --continue still returns Exit 2 on system/IO fatal errors."""
+        # Provide a patch file that doesn't exist to trigger the outer catch
+        res = self.run_p(["nonexistent.patch", "-d", self.src_dir, "--continue"])
+        self.assertEqual(res.returncode, 2)
+
+    def test_10_2_positive_sequential_creation(self):
+        """Verify sequential offsets don't interfere with new file creation."""
+        # Apply a shifted hunk to File 1 to set a file_offset
+        self.write_file("f1.txt", "extra\ntarget\n")
+        # File 2 is a creation (old_path is /dev/null)
+        patch_content = (
+            "--- f1.txt\n+++ f1.txt\n@@ -1,1 +1,1 @@\n-target\n+done\n"
+            "--- /dev/null\n+++ f2.txt\n@@ -0,0 +1,1 @@\n+new\n"
+        )
+        patch = self.write_file("seq_create.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir, "--max-offset", "5"])
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.src_dir, "f2.txt")))
 
 if __name__ == "__main__":
     unittest.main()
