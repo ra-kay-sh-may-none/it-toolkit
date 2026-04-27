@@ -1,0 +1,8 @@
+[run]
+source = batch_replace
+parallel = True
+concurrency = multiprocessing
+
+[report]
+show_missing = True
+precision = 2
