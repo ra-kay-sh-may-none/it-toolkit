@@ -3,7 +3,6 @@
 Flexible Unified Diff Patcher (FUD)
 Revision: 1.0.15 (Sprint 9: Strategy & Sequential Intelligence)
 """
-
 import os
 import sys
 import argparse
@@ -36,6 +35,15 @@ ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
 ch.setFormatter(logging.Formatter('%(message)s'))
 logger.addHandler(ch)
+
+
+import os
+# --- ENV FORENSIC START ---
+logger.debug("--- [FULL ENV TRACE] ---")
+for key, val in sorted(os.environ.items()):
+    logger.debug(f"TRACE-ENV: {key} = {val}")
+logger.debug("--- [END ENV TRACE] ---")
+# --- ENV FORENSIC END ---
 
 # --- CUSTOM EXCEPTIONS ---
 class PatcherError(Exception): pass
@@ -78,18 +86,25 @@ class DeltaDecoder:
         except IndexError: return b""
 
         while pos < len(delta_data):
-            cmd = delta_data[pos]; pos += 1
-            if cmd & 0x80: # COPY from base
-                off = size = 0
-                try:
-                    if cmd & 0x01: off = delta_data[pos]; pos += 1
-                    if cmd & 0x02: off |= delta_data[pos] << 8; pos += 1
-                    if cmd & 0x04: off |= delta_data[pos] << 16; pos += 1
-                    if cmd & 0x08: off |= delta_data[pos] << 24; pos += 1
-                    if cmd & 0x10: size = delta_data[pos]; pos += 1
-                    if cmd & 0x20: size |= delta_data[pos] << 8; pos += 1
-                    if cmd & 0x40: size |= delta_data[pos] << 16; pos += 1
-                except IndexError: break # Safety break for truncated instructions
+            cmd = delta_data[pos]; pos += 1 
+            if cmd & 0x80: # COPY from base 
+                print(f"DEBUG_HIT: DELTA_COPY_CMD_{hex(cmd)}") # Marker 1
+                off = size = 0 
+                try: 
+                    if cmd & 0x01: 
+                        print("DEBUG_HIT: BIT_0x01_OFF") # Marker 2
+                        off = delta_data[pos]; pos += 1 
+                    if cmd & 0x02: off |= delta_data[pos] << 8; pos += 1 
+                    if cmd & 0x04: off |= delta_data[pos] << 16; pos += 1 
+                    if cmd & 0x08: off |= delta_data[pos] << 24; pos += 1 
+                    if cmd & 0x10: 
+                        print("DEBUG_HIT: BIT_0x10_SIZE") # Marker 3
+                        size = delta_data[pos]; pos += 1 
+                    if cmd & 0x20: size |= delta_data[pos] << 8; pos += 1 
+                    if cmd & 0x40: size |= delta_data[pos] << 16; pos += 1 
+                except IndexError: 
+                    print("DEBUG_HIT: DELTA_INDEX_ERROR")
+                    break 
                 if size == 0: size = 0x10000
                 # Ensure we don't copy more than available in base_data
                 end_pos = off + size
@@ -439,6 +454,7 @@ class PatcherOrchestrator:
                     with open(resolved, 'r', encoding='utf-8', errors='replace') as f: 
                         work_buf = f.readlines()
                 elif is_c and not self.args.dry_run:
+                    print("DEBUG_HIT: ENTERED NESTED MKDIR BRANCH") # Add this
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
                 for h_idx, h in enumerate(pf.hunks):
@@ -506,4 +522,16 @@ def main():
         args.target_file_override = None
     sys.exit(PatcherOrchestrator(args).run_session())
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        # F12: Force the tracker to save data on Windows
+        try:
+            import coverage
+            c = coverage.Coverage.current()
+            if c:
+                c.stop()
+                c.save()
+        except:
+            pass

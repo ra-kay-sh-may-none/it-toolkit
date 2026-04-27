@@ -1,12 +1,29 @@
 [run]
-# This tells coverage to create unique data files for every process
 parallel = True
-# Points to your source code folder
+relative_files = True
+dynamic_context = test_function
 source = src
-# Ignore the runner and libraries
-omit = 
-    tests/*
-    */unittest/*
+omit = tests/*
+
+[paths]
+source =
+    src
+    */src
+    *\src
+    .
+    .\\
+    .//
+    src/
+    src\
+    */src/
+    *\src\
+    .\
+    ./
+    fud-patcher.py
+    */fud-patcher.py
+    *\fud-patcher.py
+    src/fud-patcher.py
+    src\fud-patcher.py
 
 [report]
 show_missing = True
