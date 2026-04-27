@@ -234,9 +234,11 @@ class PatchParser:
             elif l.startswith('+++ ') and cur_f:
                 cur_f.new_path = l[4:].split('\t')[0].strip()
             elif l.startswith('rename from ') and cur_f:
-                cur_f.old_path = l[12:].strip(); cur_f.is_rename = True
+                path = l[12:].strip()
+                if path: cur_f.old_path = path; cur_f.is_rename = True
             elif l.startswith('rename to ') and cur_f:
-                cur_f.new_path = l[10:].strip()
+                path = l[10:].strip()
+                if path: cur_f.new_path = path
             elif l.startswith('similarity index ') and cur_f:
                 cur_f.similarity = int(l[17:-1])
             elif l.startswith('GIT binary patch') and cur_f:
