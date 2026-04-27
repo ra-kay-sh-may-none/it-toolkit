@@ -12,27 +12,30 @@ set "COVERAGE_RCFILE=%PROJECT_ROOT%\tests\.coveragerc"
 @REM set "COVERAGE_DATA_FILE=%PROJECT_ROOT%\.coverage"
 set "COVERAGE_FILE="
 set "COVERAGE_DATA_FILE="
-set PYTHONPATH=.;tests/;src/;
+set PYTHONPATH=.;%PROJECT_ROOT%\tests;%PROJECT_ROOT%\src;
+
 python -m coverage erase
-del .coverage
-del .coverage.*
+del %PROJECT_ROOT%\.coverage
+del %PROJECT_ROOT%\.coverage.*
+
 rmdir /s /q htmlcov
 
-@REM %PROJECT_ROOT%\tests\.coveragerc"
-
-
 python "%PROJECT_ROOT%\tests\fud-patcher-test-runner.py"
+@REM python "%PROJECT_ROOT%\tests\fud-patcher-test-runner.py" -k test_16_
 
 @REM  --rcfile="%PROJECT_ROOT%\tests\.coveragerc"
 @REM python -m coverage run -m unittest "%PROJECT_ROOT%\tests\fud-patcher-test-runner.py"
+
 python -m coverage combine
-@REM python -m coverage report -m
 python -m coverage report -m
 @REM python -m coverage html
-
-@REM python -m coverage report -m --show-contexts
 python -m coverage html --show-contexts
 
-python -m coverage json --show-contexts --pretty-print -o coverage_detailed.json
+del %PROJECT_ROOT%\coverage_detailed.json
+python -m coverage json --show-contexts --pretty-print -o %PROJECT_ROOT%\coverage_detailed.json
 
-python "C:\Users\RM\Roaming\Workspaces\myrepos\ra-kay-sh-may-none\it-toolkit\batch_replace\batch_replace.py" "%PROJECT_ROOT%\tests\test_failures.log" "C:\Users\RM\Roaming\Workspaces\myrepos\ra-kay-sh-may-none\it-toolkit\batch_replace\safe_rulex.txt"  --dry-run
+del %PROJECT_ROOT%\coverage_detailed.psv
+del %PROJECT_ROOT%\coverage_detailed.aligned.psv
+python "%PROJECT_ROOT%\..\python-coverage-tools\convert_coverage_json_to_psv.py" %PROJECT_ROOT%\coverage_detailed.json
+
+python "%PROJECT_ROOT%\..\batch_replace\batch_replace.py" "%PROJECT_ROOT%\tests\test_failures.log" "%PROJECT_ROOT%\..\batch_replace\safe_rulex.txt"  --dry-run
