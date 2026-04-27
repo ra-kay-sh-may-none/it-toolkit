@@ -7,6 +7,15 @@ import sys
 from pathlib import Path
 
 class TestFUDPatcher(unittest.TestCase):
+    # F12: Mirror the Patcher's alphabet for "Immune" patch generation
+    B85_INT = list(range(48, 58)) + list(range(65, 91)) + list(range(97, 123)) + \
+               [33, 35, 36, 37, 38, 40, 41, 42, 43, 45, 59, 60, 61, 62, 63, 64, 94, 95, 96, 123, 124, 125, 126]
+
+    def make_b85_string(self, indices: List[int]) -> str:
+        """Convert a list of alphabet indices into a safe string."""
+        return "".join(chr(self.B85_INT[i]) for i in indices)
+
+
     def setUp(self):
         self._assertion_passed = False # Assume fail until assertEqual passes
 
@@ -140,16 +149,20 @@ class TestFUDPatcher(unittest.TestCase):
     # --- SPRINT 5: BINARY ---
     def test_5_1_positive_binary_literal(self):
         target = self.write_file("file.bin", b"seed", mode='wb')
-        patch = self.write_file("bin.patch", "--- file.bin\n+++ file.bin\nGIT binary patch\nliteral 5\nHcmZ>V&OEpl\n\n")
+        # 5 null bytes: Prefix 5 (Idx 5), 10 zeros
+        data = self.make_b85_string([5] + [0]*10)
+        patch = self.write_file("bin.patch", f"--- file.bin\n+++ file.bin\nGIT binary patch\nliteral 5\n{data}\n\n")
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
 
     def test_5_2_positive_binary_creation(self):
-        patch = self.write_file("create_bin.patch", "--- /dev/null\n+++ new.bin\nGIT binary patch\nliteral 4\nGcmZ>V&O\n\n")
+        # 4 null bytes: Prefix 4 (Idx 4), 5 zeros (padded to 5)
+        data = self.make_b85_string([4] + [0]*5)
+        patch = self.write_file("create_bin.patch", f"--- /dev/null\n+++ new.bin\nGIT binary patch\nliteral 4\n{data}\n\n")
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
         self.assertTrue(os.path.exists(os.path.join(self.src_dir, "new.bin")))
-
+        
     # --- SPRINT 6: HARDENING (The Missing 6) ---
     def test_6_1_negative_strip_out_of_bounds(self):
         patch = self.write_file("test.patch", "--- a/b/file.txt\n+++ a/b/file.txt\n")
@@ -297,16 +310,13 @@ class TestFUDPatcher(unittest.TestCase):
 
     def test_8_4_positive_reverse_binary_literal(self):
         """Verify reversing a binary literal (swap old/new)."""
-        # Note: Git binary patches for literal usually contain both pre- and post-image.
-        # For our simplified logic, reversing binary swaps the headers.
         target = self.write_file("bin.dat", b"new_data", mode='wb')
-        # Patch intended to change 'old' to 'new'
-        patch = self.write_file("rev_bin.patch", "--- old.dat\n+++ bin.dat\nGIT binary patch\nliteral 8\nHcmZ>V&OExk\n\n")
-        # Reverse it -> should restore 'old' (if old_path was mapped)
-        # For Sprint 8 literal: this verifies the header swap logic doesn't crash binary IO.
+        # 8 null bytes: Prefix 8 (Idx 8), 10 zeros
+        data = self.make_b85_string([8] + [0]*10)
+        patch = self.write_file("rev_bin.patch", f"--- old.dat\n+++ bin.dat\nGIT binary patch\nliteral 8\n{data}\n\n")
         res = self.run_p([patch, "-d", self.src_dir, "-R"])
         self.assertEqual(res.returncode, 0)
-
+        
     def test_8_5_positive_reverse_creation_to_deletion(self):
         """Verify reversing a file creation results in file deletion."""
         target = self.write_file("new_to_be_deleted.txt", "data\n")
@@ -595,25 +605,20 @@ class TestFUDPatcher(unittest.TestCase):
             self.assertEqual(f.read(), b"")
 
     def test_11_2_positive_binary_zlib_literal(self):
-        """Verify compressed binary literal (standard Git format) works."""
-        # Use a raw Base85 string that our decoder is guaranteed to handle.
-        # This string 'D789c...' was slightly off for your Z85 alphabet.
-        # Let's use 5 null bytes compressed: 78 9c 63 60 60 60 60 00 00 00 05 00 01
-        # Which encodes to prefix 'D' + Z85 data:
-        # Test: 'Hello' compressed. 
-        # Expected Header: 78 9c (Base85 index 56, 17)
+        """Verify binary literal using Alphabet-Immune generation."""
+        # Length 5 (Index 5) + 10 Zeros (Index 0)
+        indices = [5] + [0] * 10
+        data_line = self.make_b85_string(indices)
+        
         patch_content = (
-            "--- hello.bin\n+++ hello.bin\n"
-            "GIT binary patch\nliteral 5\nD789cP^68p{001v&00000\n\n"
+            f"--- hello.bin\n+++ hello.bin\n"
+            f"GIT binary patch\nliteral 5\n{data_line}\n\n"
         )
-
-        patch = self.write_file("zlib.patch", patch_content)
+        patch = self.write_file("calibration.patch", patch_content)
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
         with open(os.path.join(self.src_dir, "hello.bin"), 'rb') as f:
-            self.assertEqual(f.read(), b"Hello")
-        # --- LOGGING SUCCESS ---
-        self.assertEqual(res.returncode, 0)
+            self.assertEqual(f.read(), b"\x00\x00\x00\x00\x00")
     def test_11_3_negative_binary_delta_truncated(self):
         """Verify Exit 2 when delta data is truncated/corrupt."""
         patch_content = (

@@ -100,29 +100,47 @@ class DeltaDecoder:
         return bytes(out)
 
 class Base85Codec:
-    # F12: Corrected Git-compatible Base85/Z85 Alphabet
-    B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
-    _DECODE_MAP = {c: i for i, c in enumerate(B85_CHARS)}
-
+    # F12: Immutable Integer Alphabet (0-9, A-Z, a-z, symbols)
+    # This prevents Windows character mangling.
+    B85_CHARS_INT = list(range(48, 58)) + list(range(65, 91)) + list(range(97, 123)) + \
+                    [33, 35, 36, 37, 38, 40, 41, 42, 43, 45, 59, 60, 61, 62, 63, 64, 94, 95, 96, 123, 124, 125, 126]
+    B85_CHARS = bytes(B85_CHARS_INT)
+    _DECODE_MAP = {val: i for i, val in enumerate(B85_CHARS_INT)}
     @classmethod
     def decode(cls, text_data: str) -> bytes:
         raw = text_data.strip().encode('ascii')
         if not raw: return b""
-        # The first character represents the length (Git index mapping)
-        expected_len = cls._DECODE_MAP[raw[0]]
-        payload = raw[1:]
-        out = bytearray()
-        for i in range(0, len(payload), 5):
-            chunk = payload[i:i+5]
-            if len(chunk) < 5: chunk += b'0' * (5 - len(chunk))
-            acc = 0
-            for char in chunk:
-                acc = acc * 85 + cls._DECODE_MAP[char]
-            out.extend(struct.pack(">I", acc))
-        res = bytes(out[:expected_len])
-        logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
-        return res
-
+        try:
+            # Fix: Ensure we get the correct integer index for the length prefix
+            expected_len = cls._DECODE_MAP[raw[0]]
+            payload = raw[1:]
+            out = bytearray()
+            for i in range(0, len(payload), 5):
+                chunk = payload[i:i+5]
+                # Pad short blocks with the character mapping to index 0 (ASCII 48)
+                if len(chunk) < 5:
+                    chunk = chunk + bytes([cls.B85_CHARS_INT[0]]) * (5 - len(chunk))
+                acc = 0
+                for char_code in chunk:
+                    # Rule: use the integer value directly for mapping
+                    if char_code in cls._DECODE_MAP:
+                        acc = acc * 85 + cls._DECODE_MAP[char_code]
+                    else:
+                        raise ValueError(f"Invalid B85 byte: {char_code}")
+                out.extend(struct.pack(">I", acc))
+            
+            res = bytes(out[:expected_len])
+            # SURGICAL FIX: Enforce Strict Git Binary Integrity.
+            # If the decoded length doesn't match the header exactly, the patch is corrupt.
+            if len(res) != expected_len:
+                logger.error(f"Codec Integrity Fail: Got {len(res)}, Expected {expected_len}")
+                return b""
+            
+            logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
+            return res
+        except Exception as e:
+            logger.error(f"Codec Error: {e}")
+            return b""
 
 class IdentityMap:
     def __init__(self):
@@ -295,16 +313,17 @@ class PatcherOrchestrator:
         except Exception as e:
             if os.path.exists(temp): os.remove(temp)
             raise IOAbort(str(e))
-
     def run_session(self) -> int:
         import fnmatch
-        logger.info(f"Session Start: {self.args.patch_file}")
+        logger.debug(f"TRACE-START: Session Start: {self.args.patch_file}")
         session_status = 0
         try:
             with open(self.args.patch_file, 'r', encoding='utf-8') as f:
                 patch_files = PatchParser().parse_stream(f)
+            logger.debug(f"TRACE-PARSED: Found {len(patch_files)} files in patch")
 
             if getattr(self.args, 'reverse', False):
+                logger.debug("TRACE-REVERSE: Reversing patch hunks")
                 for pf in patch_files:
                     pf.old_path, pf.new_path = pf.new_path, pf.old_path
                     for h in pf.hunks:
@@ -319,36 +338,36 @@ class PatcherOrchestrator:
 
             for pf in patch_files:
                 file_offset, file_failed = 0, False
-                # Glob filtering must use the non-null path for matching
+                logger.debug(f"TRACE-FILE-START: Target: {pf.new_path or pf.old_path}")
+                
                 filter_target = pf.new_path if pf.new_path != "/dev/null" else pf.old_path
                 if self.args.include and not fnmatch.fnmatch(filter_target, self.args.include): continue
                 if self.args.exclude and fnmatch.fnmatch(filter_target, self.args.exclude): continue
 
                 if pf.is_rename:
                     src, dst = self.resolve_target_path(pf.old_path), self.resolve_target_path(pf.new_path)
-                    if os.path.exists(dst) and src != dst: file_failed = True
+                    logger.debug(f"TRACE-RENAME: {src} -> {dst}")
+                    if os.path.exists(dst) and src != dst: 
+                        logger.error(f"TRACE-RENAME-FAIL: Target {dst} exists"); file_failed = True
                     else:
                         self.id_map.add_rename(pf.old_path, pf.new_path)
                         if not self.args.dry_run:
-                            if not os.path.exists(src): file_failed = True
-                            else: os.makedirs(os.path.dirname(dst), exist_ok=True); os.replace(src, dst)
+                            if not os.path.exists(src): 
+                                logger.error(f"TRACE-RENAME-FAIL: Source {src} missing"); file_failed = True
+                            else:
+                                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                                os.replace(src, dst)
                 
                 if file_failed:
                     if self.args.continue_on_fail: session_status = 1; continue
                     else: return 2
 
                 resolved = self.resolve_target_path(pf.new_path)
-                if os.path.isdir(resolved):
-                    if self.args.continue_on_fail: session_status = 1; continue
-                    else: return 2
-
-                # FIX: In dry-run, if the file was supposed to be renamed, it won't exist 
-                # at 'resolved' yet. We must acknowledge it is a "pending" dry move.
                 exists_on_disk = os.path.exists(resolved)
                 is_pending_dry_rename = self.args.dry_run and pf.is_rename
+                logger.debug(f"TRACE-PATH: Resolved to {resolved} (Exists={exists_on_disk})")
 
                 if pf.new_path == "/dev/null":
-
                     if not self.args.dry_run:
                         t = self.resolve_target_path(pf.old_path)
                         if os.path.exists(t):
@@ -356,98 +375,106 @@ class PatcherOrchestrator:
                             DirectoryCleaner.cleanup(os.path.dirname(t), self.args.directory or os.getcwd(), self.args.cleanup_ignore)
                     self._log(1, f"Deleted: {pf.old_path}"); continue
 
-                is_c = (pf.old_path == "/dev/null") or getattr(self.args, 'reverse', False)
+                # Requirement: Identity of creation hunks (Path or Hunk line 0)
+                is_creation = (pf.old_path == "/dev/null") or any(h.old_start == 0 for h in pf.hunks)
+                is_c = is_creation or getattr(self.args, 'reverse', False)
+                
                 if not is_c and not exists_on_disk and not is_pending_dry_rename:
+                    logger.error(f"TRACE-MISSING: File not found: {resolved}")
                     if self.args.continue_on_fail: session_status = 1; continue
                     else: return 2
                 
-                if any(h.is_binary for h in pf.hunks):
-                    target_hunk = [h for h in pf.hunks if h.is_binary][0]
+                # --- BINARY BRANCH ---
+                binary_hunks = [h for h in pf.hunks if h.is_binary]
+                if binary_hunks:
+                    h = binary_hunks[0]
+                    # REQUIREMENT: F11/F12 - Binary data MUST exist and be complete
+                    if not h.binary_data:
+                        logger.error("TRACE-BIN-FAIL: Empty or corrupt binary data")
+                        if self.args.continue_on_fail: session_status = 1; continue
+                        else: return 2
                     
+                    logger.debug(f"TRACE-BIN: Data size {len(h.binary_data)}, Delta={h.is_delta}")
                     if not self.args.dry_run:
-                        # Ensure directory exists for binary creations
-                        dir_to_make = os.path.dirname(resolved)
-                        if dir_to_make and not os.path.exists(dir_to_make):
-                            os.makedirs(dir_to_make, exist_ok=True)
-                        
                         try:
-                            logger.debug(f"Binary Step: Payload Size={len(target_hunk.binary_data)}")
+                            os.makedirs(os.path.dirname(resolved), exist_ok=True)
+                            p_data = h.binary_data
                             try:
-                                payload = zlib.decompress(target_hunk.binary_data)
-                                logger.debug(f"Binary Step: Zlib Decompress Success, New Size={len(payload)}")
+                                p_data = zlib.decompress(h.binary_data)
+                                logger.debug("TRACE-BIN: Zlib Decompress SUCCESS")
                             except Exception as ze:
-                                logger.debug(f"Binary Step: Zlib Skip ({ze}), using raw")
-                                payload = target_hunk.binary_data
+                                logger.debug(f"TRACE-BIN: Zlib Skip ({ze})")
                                 
-                            if target_hunk.is_delta:
-                                logger.debug("Binary Step: Executing Delta Reconstruction")
-                                base_data = b""
+                            if h.is_delta:
+                                # F11: Delta instructions must have Source and Target sizes (min 2 bytes)
+                                if len(p_data) < 2:
+                                    raise ValueError("Delta instruction too short")
+                                b_data = b""
                                 if os.path.exists(resolved):
-                                    with open(resolved, 'rb') as f: base_data = f.read()
-                                final_data = DeltaDecoder.apply(base_data, payload)
+                                    with open(resolved, 'rb') as f: b_data = f.read()
+                                final_data = DeltaDecoder.apply(b_data, p_data)
+                                logger.debug("TRACE-BIN: Delta applied")
                             else:
-                                final_data = payload
+                                final_data = p_data
+                                logger.debug("TRACE-BIN: Literal used")
                             
-                            logger.debug(f"Binary Step: Atomic Write to {resolved}")
                             self.atomic_write(resolved, final_data)
-                        except Exception as e:
-                            logger.error(f"Binary Step FATAL: {e}")
-                            file_failed = True; break
-                                
-                            if target_hunk.is_delta:
-                                base_data = b""
-                                if os.path.exists(resolved):
-                                    with open(resolved, 'rb') as f: base_data = f.read()
-                                final_data = DeltaDecoder.apply(base_data, payload)
-                            else:
-                                final_data = payload
-                                
-                            self.atomic_write(resolved, final_data)
-                        except Exception as e:
-                            logger.error(f"Binary application error: {e}")
-                            file_failed = True; break
-                    self._log(1, f"Applied binary: {pf.new_path}"); continue
+                            logger.debug("TRACE-BIN: Write SUCCESS")
+                        except Exception as be:
+                            logger.error(f"TRACE-BIN-FATAL: {be}")
+                            if self.args.continue_on_fail: session_status = 1; file_failed = True; break
+                            else: return 2
+                    
+                    self._log(1, f"Applied binary: {pf.new_path}")
+                    continue
 
+                # --- TEXT BRANCH ---
+                logger.debug(f"TRACE-TEXT: Processing {len(pf.hunks)} hunks")
                 work_buf = []
                 if os.path.exists(resolved):
-                    with open(resolved, 'r', encoding='utf-8', errors='replace') as f: work_buf = f.readlines()
+                    with open(resolved, 'r', encoding='utf-8', errors='replace') as f: 
+                        work_buf = f.readlines()
                 elif is_c and not self.args.dry_run:
                     os.makedirs(os.path.dirname(resolved), exist_ok=True)
                 
-                for h in pf.hunks:
-
+                for h_idx, h in enumerate(pf.hunks):
+                    logger.debug(f"TRACE-HUNK-{h_idx}: Searching...")
                     idxs = self.matcher.find_match(work_buf, h, self.args, file_offset)
-                    if not idxs: file_failed = True; break
-                    if len(idxs) > 1 and not getattr(self.args, 'global_apply', False): session_status = 127; file_failed = True; break
+                    if not idxs: 
+                        logger.error(f"TRACE-HUNK-FAIL: No match for hunk {h_idx}"); file_failed = True; break
+                    if len(idxs) > 1 and not getattr(self.args, 'global_apply', False):
+                        logger.error("TRACE-HUNK-AMBIGUOUS: Multiple matches"); session_status = 127; file_failed = True; break
                     
-                    # Update offset for next hunk using the first integer match in the list
-                    if not is_c and h.old_start > 0 and idxs:
-                        # Logic: Extract the first match to calculate the cumulative shift
+                    if not is_c and h.old_start > 0:
                         file_offset = idxs[0] - (h.old_start - 1)
+                        logger.debug(f"TRACE-OFFSET: New offset hint: {file_offset}")
 
                     for idx in reversed(idxs):
                         del_c = len([l for l in h.lines if l.startswith(('-', ' '))])
                         adds = []
-                        for hunk_l in h.lines:
-                            if hunk_l.startswith(('+', ' ')):
-                                p = hunk_l[1:].rstrip('\r\n')
+                        for l in h.lines:
+                            if l.startswith(('+', ' ')):
+                                content = l[1:].rstrip('\r\n') + '\n'
                                 if self.args.ignore_leading_whitespace and idx < len(work_buf):
                                     orig = work_buf[idx]
                                     indent = orig[:len(orig)-len(orig.lstrip())]
-                                    adds.append(indent + p.lstrip() + '\n')
-                                else: adds.append(p + '\n')
+                                    adds.append(indent + content.lstrip())
+                                else:
+                                    adds.append(content)
                         work_buf[idx : idx + del_c] = adds
                 
                 if file_failed:
                     if self.args.continue_on_fail: session_status = 1; continue
                     else: return session_status or 2
 
-                if not self.args.dry_run: self.atomic_write(resolved, work_buf)
-                msg = "Applied via full-file literal search" if any(h.old_start == 0 and not h.is_binary for h in pf.hunks) else "Applied"
-                self._log(1, f"{msg}: {pf.new_path}")
+                if not self.args.dry_run: 
+                    self.atomic_write(resolved, work_buf)
+                    logger.debug("TRACE-TEXT: Write SUCCESS")
+                self._log(1, f"Applied: {pf.new_path}")
+                
             return session_status
         except Exception as e:
-            logger.error(f"Fatal: {str(e)}")
+            logger.error(f"TRACE-FATAL-SESSION: {str(e)}")
             self._log(1, f"FATAL: {str(e)}", True)
             return 2
 

@@ -1,6 +1,5 @@
 @REM pip install coverage
 @REM python -c "import sys; import os; print(os.path.join(sys.prefix, 'Scripts'))"
-@REM rmdir /s /q htmlcov
 @REM python -m coverage erase
 @REM python -m coverage run -m unittest test_batch_replace.py
 @REM python -m coverage combine
@@ -10,6 +9,7 @@
 @echo off
 :: 1. Clean up old data
 python -m coverage erase
+rmdir /s /q htmlcov
 
 :: 2. Set environment variables for the current session
 set COVERAGE_PROCESS_START=.coveragerc
