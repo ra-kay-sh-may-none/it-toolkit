@@ -1,0 +1,8 @@
+<title>.*?</title>
+---
+<title>New Multiline 
+Title</title>
+[RULE]
+/\*.*?\*/
+---
+/* Comments Removed */
