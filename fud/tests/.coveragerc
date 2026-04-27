@@ -1,3 +1,12 @@
 [run]
-concurrency = subprocess
+# This tells coverage to create unique data files for every process
+parallel = True
+# Points to your source code folder
 source = src
+# Ignore the runner and libraries
+omit = 
+    tests/*
+    */unittest/*
+
+[report]
+show_missing = True

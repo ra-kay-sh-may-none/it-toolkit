@@ -210,7 +210,9 @@ class Matcher:
             if mismatches <= args.fuzz:
                 matches.append(i)
                 logger.debug(f"Matcher SUCCESS: Match found at index {i} with offset {offset}")
-                if not getattr(args, 'global_apply', False) and len(matches) > 1: break
+                # F10/Coverage: Allow finding at least 2 matches to trigger ambiguity check
+                if not getattr(args, 'global_apply', False) and len(matches) > 1:
+                    break
         
         logger.debug(f"Matcher FINAL: Found {len(matches)} total hits for target line {hunk.old_start}")
         return matches

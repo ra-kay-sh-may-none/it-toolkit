@@ -86,7 +86,8 @@ class TestFUDPatcher(unittest.TestCase):
         test_name = self.id().split('.')[-1]
         env = dict(os.environ)
         env["FUD_TRACE_ID"] = test_name
-        cmd = [sys.executable, self.patcher_exe] + args
+        # SURGICAL INJECTION: Wrap the patcher execution with coverage
+        cmd = [sys.executable, "-m", "coverage", "run", "-a", self.patcher_exe] + args
         res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=env)
         self.last_res = res        # if res.returncode != 0:
         #     # Persistent Failure Logging
@@ -162,7 +163,7 @@ class TestFUDPatcher(unittest.TestCase):
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
         self.assertTrue(os.path.exists(os.path.join(self.src_dir, "new.bin")))
-        
+
     # --- SPRINT 6: HARDENING (The Missing 6) ---
     def test_6_1_negative_strip_out_of_bounds(self):
         patch = self.write_file("test.patch", "--- a/b/file.txt\n+++ a/b/file.txt\n")
@@ -628,6 +629,83 @@ class TestFUDPatcher(unittest.TestCase):
         patch = self.write_file("trunc.patch", patch_content)
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 2)
+
+    def test_13_1_negative_path_strip_overrun(self):
+        """Coverage: Triggers PatcherError when strip >= path depth."""
+        patch = self.write_file("p3.patch", "--- a/b/c.txt\n+++ a/b/c.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n")
+        # Stripping 5 levels from a 3-level path
+        res = self.run_p([patch, "-p", "5", "-d", self.src_dir])
+        self.assertEqual(res.returncode, 2)
+
+    def test_13_2_positive_filter_include_skip(self):
+        """Coverage: Exercise the 'continue' branch in inclusion filtering."""
+        self.write_file("keep.txt", "data\n")
+        self.write_file("skip.txt", "data\n")
+        patch = self.write_file("filter.patch", 
+            "--- keep.txt\n+++ keep.txt\n@@ -1,1 +1,1 @@\n-data\n+keep\n"
+            "--- skip.txt\n+++ skip.txt\n@@ -1,1 +1,1 @@\n-data\n+skip\n")
+        # Only include keep.txt
+        res = self.run_p([patch, "-d", self.src_dir, "--include", "keep.txt"])
+        self.assertEqual(res.returncode, 0)
+        with open(os.path.join(self.src_dir, "skip.txt")) as f:
+            self.assertEqual(f.read(), "data\n") # Should NOT be changed
+
+    def test_13_3_negative_ambiguity_exit_127(self):
+        """Coverage: Triggers Exit 127 when multiple matches found without --global."""
+        # Setup: Ensure multiple identical lines exist
+        self.write_file("dup.txt", "same\nsame\n")
+        # Patch: A hunk without line number hints (old_start=0) to force a full-file scan
+        patch_content = "--- dup.txt\n+++ dup.txt\n@@ -0,0 +1,1 @@\n-same\n+changed\n"
+        patch = self.write_file("ambig.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        # Expect Exit 127 because it finds 'same' twice and doesn't know which one to patch
+        self.assertEqual(res.returncode, 127)
+        self._assertion_passed = True
+
+    def test_13_4_positive_continue_on_fail(self):
+        """Coverage: Verify --continue flag processes file 2 even if file 1 fails."""
+        self.write_file("good.txt", "data\n")
+        patch = self.write_file("cont.patch", 
+            "--- missing.txt\n+++ missing.txt\n@@ -1,1 +1,1 @@\n-no\n+yes\n"
+            "--- good.txt\n+++ good.txt\n@@ -1,1 +1,1 @@\n-data\n+passed\n")
+        # Should return 1 (session_status) because one file failed, but good.txt should be patched
+        res = self.run_p([patch, "-d", self.src_dir, "--continue"])
+        self.assertEqual(res.returncode, 1)
+        with open(os.path.join(self.src_dir, "good.txt")) as f:
+            self.assertEqual(f.read(), "passed\n")
+
+    def test_14_1_negative_identity_conflict(self):
+        """Coverage: Exercise Path Conflict logic (F9)."""
+        self.write_file("a.txt", "data")
+        # Rule: Parser needs ---/+++ to initialize a PatchFile object
+        patch_content = (
+            "--- a.txt\n+++ b.txt\n"
+            "rename from a.txt\nrename to b.txt\n"
+            "--- c.txt\n+++ b.txt\n"
+            "rename from c.txt\nrename to b.txt\n"
+        )
+        patch = self.write_file("conflict.patch", patch_content)
+        res = self.run_p([patch, "-d", self.src_dir])
+        # Should return 2 because both files want to become 'b.txt'
+        self.assertEqual(res.returncode, 2)
+        self._assertion_passed = True
+
+    def test_14_2_negative_mangled_header(self):
+        """Coverage: Exercise Parser regex failure."""
+        patch = self.write_file("bad_hunk.patch", "--- a.txt\n+++ a.txt\n@@ mangled header @@\n-a\n+b\n")
+        res = self.run_p([patch, "-d", self.src_dir])
+        # Regex mismatch results in no hunks being parsed, returning Exit 2
+        self.assertEqual(res.returncode, 2)
+
+    def test_14_3_positive_reverse_creation(self):
+        """Coverage: Verify reversing a creation becomes a deletion."""
+        self.write_file("new.txt", "data\n")
+        # A patch that creates 'new.txt'
+        patch = self.write_file("rev_create.patch", "--- /dev/null\n+++ new.txt\n@@ -0,0 +1,1 @@\n+data\n")
+        # Reverse it: should delete the file
+        res = self.run_p([patch, "-d", self.src_dir, "-R"])
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.src_dir, "new.txt")))
 
 if __name__ == "__main__":
     unittest.main()
