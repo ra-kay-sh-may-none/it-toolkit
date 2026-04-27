@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, TextIO
 import struct
 import logging
+import zlib
 
 # --- LOGGING INFRASTRUCTURE (Harness v1.6.0) ---
 class TraceFilter(logging.Filter):
@@ -99,45 +100,29 @@ class DeltaDecoder:
         return bytes(out)
 
 class Base85Codec:
+    # F12: Corrected Git-compatible Base85/Z85 Alphabet
     B85_CHARS = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
-    _DECODE_MAP = {char_code: index for index, char_code in enumerate(B85_CHARS)}
+    _DECODE_MAP = {c: i for i, c in enumerate(B85_CHARS)}
 
     @classmethod
     def decode(cls, text_data: str) -> bytes:
-        # SURGICAL FIX: We must strip leading/trailing whitespace 
-        # before identifying the length character.
         raw = text_data.strip().encode('ascii')
         if not raw: return b""
-        
-        # DIAGNOSTIC: Log the raw input string
-        logger.debug(f"Codec Input: {text_data.strip()}")
-        try:
-            # FIX: Ensure we use the integer ASCII value of the first character
-            length_char = raw[0]
-            if length_char not in cls._DECODE_MAP:
-                return b""
-            expected_len = cls._DECODE_MAP[length_char]
-            payload, out = raw[1:], bytearray()
-            for i in range(0, len(payload), 5):
-                chunk = payload[i:i+5]
-                if len(chunk) < 5:
-                    chunk = chunk + b"0" * (5 - len(chunk))
-                acc = 0
-                for char_code in chunk:
-                    if char_code in cls._DECODE_MAP:
-                        acc = acc * 85 + cls._DECODE_MAP[char_code]
-                    else:
-                        raise ValueError(f"Invalid B85 char: {chr(char_code)}")
-                out.extend(struct.pack(">I", acc))
-            
-            # SURGICAL FIX: Force exact length truncation
-            res = bytes(out[:expected_len])
+        # The first character represents the length (Git index mapping)
+        expected_len = cls._DECODE_MAP[raw[0]]
+        payload = raw[1:]
+        out = bytearray()
+        for i in range(0, len(payload), 5):
+            chunk = payload[i:i+5]
+            if len(chunk) < 5: chunk += b'0' * (5 - len(chunk))
+            acc = 0
+            for char in chunk:
+                acc = acc * 85 + cls._DECODE_MAP[char]
+            out.extend(struct.pack(">I", acc))
+        res = bytes(out[:expected_len])
+        logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
+        return res
 
-            logger.debug(f"Codec Output: {res.hex()} (Expected: {expected_len})")
-            return res
-        except Exception as e:
-            logger.error(f"Codec Exception: {str(e)}")
-            return b""
 
 class IdentityMap:
     def __init__(self):
@@ -377,26 +362,46 @@ class PatcherOrchestrator:
                     else: return 2
                 
                 if any(h.is_binary for h in pf.hunks):
-                    # F11: Support both 'literal' and 'delta' binary hunks
-                    # Rule: Take the first binary hunk (index 0) as the post-image
-                    binary_hunks = [h for h in pf.hunks if h.is_binary]
-                    target_hunk = binary_hunks[0]
+                    target_hunk = [h for h in pf.hunks if h.is_binary][0]
                     
                     if not self.args.dry_run:
                         # Ensure directory exists for binary creations
                         dir_to_make = os.path.dirname(resolved)
                         if dir_to_make and not os.path.exists(dir_to_make):
-                            os.makedirs(dir_to_make, exist_ok=True)                        
-                        # Logic: Handle incremental delta vs full literal replacement
+                            os.makedirs(dir_to_make, exist_ok=True)
+                        
                         try:
+                            logger.debug(f"Binary Step: Payload Size={len(target_hunk.binary_data)}")
+                            try:
+                                payload = zlib.decompress(target_hunk.binary_data)
+                                logger.debug(f"Binary Step: Zlib Decompress Success, New Size={len(payload)}")
+                            except Exception as ze:
+                                logger.debug(f"Binary Step: Zlib Skip ({ze}), using raw")
+                                payload = target_hunk.binary_data
+                                
+                            if target_hunk.is_delta:
+                                logger.debug("Binary Step: Executing Delta Reconstruction")
+                                base_data = b""
+                                if os.path.exists(resolved):
+                                    with open(resolved, 'rb') as f: base_data = f.read()
+                                final_data = DeltaDecoder.apply(base_data, payload)
+                            else:
+                                final_data = payload
+                            
+                            logger.debug(f"Binary Step: Atomic Write to {resolved}")
+                            self.atomic_write(resolved, final_data)
+                        except Exception as e:
+                            logger.error(f"Binary Step FATAL: {e}")
+                            file_failed = True; break
+                                
                             if target_hunk.is_delta:
                                 base_data = b""
                                 if os.path.exists(resolved):
                                     with open(resolved, 'rb') as f: base_data = f.read()
-                                final_data = DeltaDecoder.apply(base_data, target_hunk.binary_data)
+                                final_data = DeltaDecoder.apply(base_data, payload)
                             else:
-                                final_data = target_hunk.binary_data
-                            
+                                final_data = payload
+                                
                             self.atomic_write(resolved, final_data)
                         except Exception as e:
                             logger.error(f"Binary application error: {e}")

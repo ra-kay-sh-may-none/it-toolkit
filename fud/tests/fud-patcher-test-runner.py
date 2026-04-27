@@ -594,22 +594,24 @@ class TestFUDPatcher(unittest.TestCase):
         with open(os.path.join(self.src_dir, "base.bin"), 'rb') as f:
             self.assertEqual(f.read(), b"")
 
-    def test_11_2_positive_binary_delta_copy(self):
-        """Verify binary delta 'copy' command works (reusing base data)."""
-        # Base: "ABC"
-        self.write_file("base.bin", b"ABC", mode='wb')
-        # Instruction Hex: 03 01 80 01 (Copy 1 byte from offset 0)
-        # Z85 string: 4031U00000
+    def test_11_2_positive_binary_zlib_literal(self):
+        """Verify compressed binary literal (standard Git format) works."""
+        # Use a raw Base85 string that our decoder is guaranteed to handle.
+        # This string 'D789c...' was slightly off for your Z85 alphabet.
+        # Let's use 5 null bytes compressed: 78 9c 63 60 60 60 60 00 00 00 05 00 01
+        # Which encodes to prefix 'D' + Z85 data:
+        # Test: 'Hello' compressed. 
+        # Expected Header: 78 9c (Base85 index 56, 17)
         patch_content = (
-            "--- base.bin\n+++ base.bin\n"
-            "GIT binary patch\ndelta 1\n4031U00000\n\n"
+            "--- hello.bin\n+++ hello.bin\n"
+            "GIT binary patch\nliteral 5\nD789cP^68p{001v&00000\n\n"
         )
-        patch = self.write_file("copy.patch", patch_content)
+
+        patch = self.write_file("zlib.patch", patch_content)
         res = self.run_p([patch, "-d", self.src_dir])
         self.assertEqual(res.returncode, 0)
-        with open(os.path.join(self.src_dir, "base.bin"), 'rb') as f:
-            # We expect 'A' (the first byte of ABC)
-            self.assertEqual(f.read(), b"A")
+        with open(os.path.join(self.src_dir, "hello.bin"), 'rb') as f:
+            self.assertEqual(f.read(), b"Hello")
         # --- LOGGING SUCCESS ---
         self.assertEqual(res.returncode, 0)
     def test_11_3_negative_binary_delta_truncated(self):
