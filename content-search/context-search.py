@@ -43,7 +43,9 @@ def csearch():
             for i in range(start, end):
                 # Avoid re-printing lines if context blocks overlap
                 if i >= last_printed_idx:
-                    marker = "> " if i == idx else "  "
+                    # marker = "> " if i == idx else "  "
+                    marker = "  "
+                    
                     print(f"{marker}{lines[i].rstrip()}")
             
             last_printed_idx = end
