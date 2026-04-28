@@ -968,29 +968,28 @@ class TestFUDPatcher(unittest.TestCase):
         self.assertIn(res.returncode, [0, 2])
 
     def test_16_5_delta_decoder_brute_force_copy(self):
-        """Coverage: Force entry into COPY block (Line 91+) by saturating the buffer."""
-        # 1. Create a base file long enough for any offset/size logic
+        """Force high-bit logic (Line 91+) with safe 32-bit blocks."""
         self.write_file("big.bin", b"A" * 1024, mode='wb')
         
-        # 2. Corrected Indices:
-        # Block A (10 indices): Satisfies Source/Target size headers
-        # Block B (15 indices): Fills buffer with 0xFF bytes to ensure high-bit cmd
-        indices = [10, 10, 10, 10, 10, 10, 10, 10, 10, 10] 
-        indices += [84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84, 84]
+        # Block 1: [78, 10, 10, 10, 10] -> First byte is 0x91 (High bit SET)
+        # Block 2: [10, 10, 10, 10, 10] -> Metadata bytes
+        # Total 10 indices = 8 bytes of data.
+        # This is enough to satisfy headers and hit the COPY block.
+        indices = [78, 10, 10, 10, 10, 10, 10, 10, 10, 10]
         
         data_line = self.make_b85_string(indices)
         
-        # 'delta 10' tells the parser to expect 10 bytes of target data
+        # 'delta 5' matches the logic
         patch_content = (
             f"--- big.bin\n+++ big.bin\n"
-            f"GIT binary patch\ndelta 10\n{data_line}\n\n"
+            f"GIT binary patch\ndelta 5\n{data_line}\n\n"
         )
         patch = self.write_file("brute.patch", patch_content)
         
-        # 3. Run and verify it doesn't crash the runner
         res = self.run_p([patch, "-d", self.src_dir])
-        # It might fail with returncode 2 (corrupt), which is fine for coverage
-        self.assertIn(res.returncode, [0, 2])
+        # We expect returncode 2 because the delta is mathematically 'junk',
+        # but the coverage will be hit before the fail!
+        self.assertEqual(res.returncode, 2)
 
 if __name__ == "__main__":
     unittest.main()
