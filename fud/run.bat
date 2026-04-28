@@ -51,5 +51,5 @@ python "%PROJECT_ROOT%\..\batch_replace\batch_replace.py" "%PROJECT_ROOT%\tests\
 
 @REM grep -h -C 1 "| MISSING |"  "%PROJECT_ROOT%\coverage_detailed.psv"
 @REM @REM --group-separator="--------------------------------" 
-python "%PROJECT_ROOT%\..\content-search\context-search.py" "| MISSING |" "%PROJECT_ROOT%\coverage_detailed.psv" -hide -C 0 -s "============"
+python "%PROJECT_ROOT%\..\content-search\context-search.py" "| MISSING |" "%PROJECT_ROOT%\coverage_detailed.psv" -hide -C 1 -s "============"
 set FUD_FULL_SUITE=
